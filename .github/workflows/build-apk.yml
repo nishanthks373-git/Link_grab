@@ -19,7 +19,7 @@ jobs:
       - name: Publish build log on failure
         if: failure()
         run: |
-          mkdir /tmp/lg && tail -n 150 /tmp/build.log > /tmp/lg/build.log && cd /tmp/lg && git init -q -b build-log
+          mkdir /tmp/lg && { grep -E '^(e|w): ' /tmp/build.log | grep -v '^w: ' ; tail -n 60 /tmp/build.log; } > /tmp/lg/build.log && cd /tmp/lg && git init -q -b build-log
           git config user.name github-actions && git config user.email actions@github.com
           git add . && git commit -qm log && git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" build-log
       - uses: actions/upload-artifact@v4
