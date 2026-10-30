@@ -19,11 +19,10 @@ Android app (Kotlin + Jetpack Compose) that downloads video or audio from links.
 3. Run on a device or emulator (Android 10 / API 29 or newer). Use **Build > Build APK(s)** for a shareable APK.
 
 ## Build the APK on GitHub (no Android Studio needed)
-1. Create a new GitHub repository and upload the contents of this folder to it (keep the `.github` folder).
-2. Open the **Actions** tab. The "Build APK" workflow runs on every push, or run it manually with **Run workflow**.
-3. When it finishes (about 5 to 10 minutes), open the run and download **LinkGrab-debug-apk** from the Artifacts section.
-4. Unzip it, copy `app-debug.apk` to your phone and install it (allow installs from unknown sources when asked).
-If the build fails, open the failed step and send me the error text.
+The "Build APK" workflow runs on every push (or manually from the Actions tab).
+- On success, the APK is published to the **apk-build** branch as `LinkGrab.apk` and also attached to the run as the **LinkGrab-apk** artifact. Download it from the apk-build branch on GitHub (open `LinkGrab.apk`, then Download raw file), copy it to your phone and install it (allow installs from unknown sources when asked).
+- On failure, the last lines of the build log are published to the **build-log** branch (`build.log`).
+- Builds use a fixed debug key (`app/link.keystore`), so a new build installs over the previous one without uninstalling.
 
 ## Notes
 - The yt-dlp library version is set in `app/build.gradle.kts` (`ytdlp`). Check Maven Central for `io.github.junkfood02.youtubedl-android` and bump it if a newer release exists.

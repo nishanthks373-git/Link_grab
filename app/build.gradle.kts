@@ -8,6 +8,16 @@ android {
     namespace = "com.example.linkgrab"
     compileSdk = 35
 
+    signingConfigs {
+        // Fixed key so every build is signed the same way and updates install over older versions.
+        getByName("debug") {
+            storeFile = file("link.keystore")
+            storePassword = "linkgrab123"
+            keyAlias = "link"
+            keyPassword = "linkgrab123"
+        }
+    }
+
     defaultConfig {
         applicationId = "com.example.linkgrab"
         minSdk = 29
