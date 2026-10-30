@@ -236,7 +236,7 @@ object PreviewRepository {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                val msg = e.message.orEmpty().lineSequence()
+                val msg = LinkParser.friendlyError(url, e.message) ?: e.message.orEmpty().lineSequence()
                     .lastOrNull { it.isNotBlank() }?.removePrefix("ERROR: ")?.take(200)
                 patch(id) {
                     it.copy(state = PreviewState.ERROR, error = msg ?: "Couldn't read this link")
@@ -282,7 +282,12 @@ object PreviewRepository {
             addOption("--no-warnings")
         }
         val out = YoutubeDL.getInstance().execute(request, "info-$id") { _, _, _ -> }.out
-        val json = JSONObject(out.substring(out.indexOf('{').coerceAtLeast(0)))
+        var json = JSONObject(out.substring(out.indexOf('{').coerceAtLeast(0)))
+
+        // An Instagram post with several videos is a playlist; use its first video.
+        if (json.optString("_type") == "playlist" && LinkParser.isInstagram(url)) {
+            json.optJSONArray("entries")?.optJSONObject(0)?.let { json = it }
+        }
 
         if (json.optString("_type") == "playlist") {
             error("This is a playlist link. Paste the individual video links instead.")

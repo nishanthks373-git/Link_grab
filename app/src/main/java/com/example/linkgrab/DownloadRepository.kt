@@ -339,7 +339,7 @@ object DownloadRepository {
                 patch(id) {
                     it.copy(
                         status = Status.FAILED,
-                        message = e.message?.take(300) ?: e.javaClass.simpleName,
+                        message = LinkParser.friendlyError(item.url, e.message) ?: e.message?.take(300) ?: e.javaClass.simpleName,
                     )
                 }
             }
@@ -420,6 +420,18 @@ object DownloadRepository {
             YoutubeDL.getInstance().init(app)
             FFmpeg.getInstance().init(app)
             engineReady = true
+            refreshEngineDaily()
+        }
+    }
+
+    /** Sites like Instagram change often, so refresh yt-dlp in the background at most once a day. */
+    private fun refreshEngineDaily() {
+        val prefs = app.getSharedPreferences("engine", Context.MODE_PRIVATE)
+        val last = prefs.getLong("lastUpdate", 0L)
+        if (System.currentTimeMillis() - last < 24L * 3600 * 1000) return
+        prefs.edit().putLong("lastUpdate", System.currentTimeMillis()).apply()
+        scope.launch {
+            runCatching { YoutubeDL.getInstance().updateYoutubeDL(app) }
         }
     }
 
@@ -443,6 +455,7 @@ object DownloadRepository {
         prepareEngine()
         val request = YoutubeDLRequest(item.url).apply {
             addOption("--no-playlist")
+            if (LinkParser.isInstagram(item.url)) addOption("--playlist-items", "1")
             addOption("--no-mtime")
             addOption("--continue")
             addOption("--retries", "15")

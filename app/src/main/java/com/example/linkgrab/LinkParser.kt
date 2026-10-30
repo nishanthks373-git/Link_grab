@@ -16,9 +16,28 @@ object LinkParser {
         urlRegex.findAll(text)
             .map { it.value.trimEnd('.', ',', ';', ')', ']', '}', '!', '?') }
             .map { if (it.startsWith("www.", ignoreCase = true)) "https://$it" else it }
+            .map { tidy(it) }
             .filter { Uri.parse(it).host?.contains('.') == true }
             .distinct()
             .toList()
+
+    fun isInstagram(url: String): Boolean =
+        Uri.parse(url).host?.lowercase()?.let { it == "instagr.am" || it.endsWith("instagram.com") } == true
+
+    /** Drops tracking parameters (?igsh=...) from Instagram links and fixes /reels/ links. */
+    private fun tidy(url: String): String {
+        if (!isInstagram(url)) return url
+        return url.substringBefore('?').substringBefore('#').replace("/reels/", "/reel/")
+    }
+
+    /** Turns Instagram's usual refusals into something understandable. */
+    fun friendlyError(url: String, message: String?): String? {
+        if (!isInstagram(url)) return null
+        val m = message.orEmpty()
+        return if (Regex("login|rate-limit|empty media|private|checkpoint|not available|cookies", RegexOption.IGNORE_CASE).containsMatchIn(m))
+            "Instagram wouldn't share this video. Only public posts work, and Instagram sometimes blocks requests. Try again later, or tap Update engine."
+        else null
+    }
 
     private fun extensionOf(url: String): String =
         Uri.parse(url).lastPathSegment?.substringAfterLast('.', "")?.lowercase().orEmpty()
