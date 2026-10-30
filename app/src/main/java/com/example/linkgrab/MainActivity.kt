@@ -352,7 +352,7 @@ private fun MainScreen() {
 
     if (bulkAsk) {
         var hidden by remember { mutableStateOf(false) }
-        val ids = selected.map { it.id }
+        val ids = previews.filter { it.checked && it.state == PreviewState.READY && it.chosen != null }.map { it.id }
         AlertDialog(
             onDismissRequest = { bulkAsk = false },
             title = { Text("Download ${ids.size} item(s)", fontWeight = FontWeight.Bold) },
