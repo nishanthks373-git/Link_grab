@@ -54,8 +54,8 @@ object DownloadRepository {
 
     /** Adds chosen downloads to the queue. Returns how many were new (identical active ones are skipped). */
     fun enqueue(requests: List<QueueRequest>): Int {
-        val alreadyActive = _items.value.filter { it.isActive }.map { Triple(it.url, it.mode, it.height) }.toSet()
-        val fresh = requests.filter { Triple(it.url, it.mode, it.height) !in alreadyActive }
+        val alreadyActive = _items.value.filter { it.isActive }.map { listOf(it.url, it.mode, it.height, it.isPrivate) }.toSet()
+        val fresh = requests.filter { listOf(it.url, it.mode, it.height, it.isPrivate) !in alreadyActive }
         if (fresh.isEmpty()) return 0
 
         val newItems = fresh.map {
@@ -66,6 +66,7 @@ object DownloadRepository {
                 height = it.height,
                 title = it.title,
                 thumbnail = it.thumbnail,
+                isPrivate = it.isPrivate,
             )
         }
         _items.update { it + newItems }
@@ -136,13 +137,14 @@ object DownloadRepository {
             } else {
                 downloadWithYtDlp(item, tmp)
             }
-            val savedName = saveToDownloads(file)
+            val savedName = if (item.isPrivate) savePrivately(item, file) else saveToDownloads(file)
             patch(id) {
                 it.copy(
                     status = Status.DONE,
                     progress = 1f,
                     title = savedName,
-                    message = "Saved to Downloads/LinkGrab",
+                    message = if (item.isPrivate) "Saved privately. Open the Private tab to play it"
+                    else "Saved to Downloads/LinkGrab",
                 )
             }
         } catch (e: CancellationException) {
@@ -255,6 +257,22 @@ object DownloadRepository {
             ?: error("yt-dlp finished but produced no file")
         patchIfRunning(item.id) { it.copy(title = result.name) }
         return result
+    }
+
+    // ------------------------------------------------------------ save privately
+
+    /** Moves the file into the app's private storage; it never touches Downloads or MediaStore. */
+    private fun savePrivately(item: DownloadItem, file: File): String {
+        val thumbBytes = item.thumbnail?.let { url ->
+            runCatching {
+                http.newCall(Request.Builder().url(url).build()).execute().use { r ->
+                    if (r.isSuccessful) r.body?.bytes() else null
+                }
+            }.getOrNull()
+        }
+        val title = file.nameWithoutExtension
+        PrivateStore.save(file, title, item.mode == Mode.AUDIO, thumbBytes)
+        return title
     }
 
     // --------------------------------------------------------- save to Downloads

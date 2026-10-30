@@ -12,6 +12,8 @@ data class QueueRequest(
     val height: Int?,
     val title: String?,
     val thumbnail: String?,
+    /** Save inside the app only (not visible to other apps). */
+    val isPrivate: Boolean = false,
 )
 
 data class DownloadItem(
@@ -25,6 +27,7 @@ data class DownloadItem(
     val title: String? = null,
     val thumbnail: String? = null,
     val message: String? = null,
+    val isPrivate: Boolean = false,
 ) {
     val isActive get() = status == Status.QUEUED || status == Status.RUNNING
 }

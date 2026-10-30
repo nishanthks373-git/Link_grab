@@ -6,7 +6,15 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.widget.MediaController
 import android.widget.Toast
+import android.widget.VideoView
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -120,6 +128,10 @@ private fun MainScreen() {
     val queue by DownloadRepository.items.collectAsState()
 
     var input by remember { mutableStateOf("") }
+    var tab by remember { mutableStateOf(0) }
+    var privateMode by remember { mutableStateOf(false) }
+    var playing by remember { mutableStateOf<PrivateStore.Entry?>(null) }
+    val privateEntries by PrivateStore.entries.collectAsState()
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
 
@@ -147,11 +159,41 @@ private fun MainScreen() {
     val knownBytes = selected.sumOf { it.chosen?.sizeBytes ?: 0L }
     val unknownCount = selected.count { (it.chosen?.sizeBytes ?: 0L) <= 0L }
 
+    playing?.let { entry ->
+        PlayerScreen(entry) { playing = null }
+        return
+    }
+
     Scaffold(
-        topBar = { TopAppBar(title = { Text("LinkGrab") }) },
+        topBar = {
+            Column {
+                TopAppBar(title = { Text("LinkGrab") })
+                TabRow(selectedTabIndex = tab) {
+                    Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Download") })
+                    Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Private (${privateEntries.size})") })
+                }
+            }
+        },
         bottomBar = {
-            if (selected.isNotEmpty()) {
+            if (tab == 0 && selected.isNotEmpty()) {
                 Surface(tonalElevation = 6.dp, modifier = Modifier.navigationBarsPadding()) {
+                    Column {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 8.dp, end = 16.dp, top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(checked = privateMode, onCheckedChange = { privateMode = it })
+                        Column {
+                            Text("Download privately", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                "Only visible and playable inside this app",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -170,15 +212,26 @@ private fun MainScreen() {
                             )
                         }
                         Button(onClick = {
-                            val n = PreviewRepository.downloadChecked()
-                            toast(if (n > 0) "Downloading $n item(s)" else "Already in the queue")
+                            val n = PreviewRepository.downloadChecked(privateMode)
+                            toast(
+                                if (n > 0) "Downloading $n item(s)" + (if (privateMode) " privately" else "")
+                                else "Already in the queue"
+                            )
                         }) { Text("Download") }
+                    }
                     }
                 }
             }
         },
     ) { padding ->
-        LazyColumn(
+        if (tab == 1) {
+            PrivateLibrary(
+                modifier = Modifier
+                    .padding(padding)
+                    .padding(horizontal = 16.dp),
+                onPlay = { playing = it },
+            )
+        } else LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
@@ -382,7 +435,7 @@ private fun QualityDropdown(item: PreviewItem) {
 }
 
 @Composable
-private fun Thumb(url: String?, durationSec: Long?, width: Dp) {
+private fun Thumb(url: Any?, durationSec: Long?, width: Dp) {
     Box(
         modifier = Modifier
             .width(width)
@@ -450,6 +503,7 @@ private fun QueueCard(item: DownloadItem) {
                                 else -> " · video"
                             }
                         )
+                        if (item.isPrivate) append(" · private")
                         if (item.status != Status.RUNNING && !item.message.isNullOrBlank()) append("\n${item.message}")
                     },
                     style = MaterialTheme.typography.bodySmall,
@@ -486,3 +540,107 @@ private fun readText(context: Context, uri: Uri): String? =
     runCatching {
         context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
     }.getOrNull()
+
+
+// ================================================================ private library
+
+@Composable
+private fun PrivateLibrary(modifier: Modifier = Modifier, onPlay: (PrivateStore.Entry) -> Unit) {
+    val entries by PrivateStore.entries.collectAsState()
+    var toDelete by remember { mutableStateOf<PrivateStore.Entry?>(null) }
+
+    if (entries.isEmpty()) {
+        Column(modifier = modifier.padding(top = 16.dp)) {
+            Text(
+                "No private files yet. Tick \"Download privately\" before you download, and the files will show up here. They can only be opened inside this app and are deleted if you uninstall it.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    } else {
+        LazyColumn(
+            modifier = modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(vertical = 12.dp),
+        ) {
+            items(entries.asReversed(), key = { it.id }) { entry ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Thumb(PrivateStore.thumb(entry), null, width = 96.dp)
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                text = entry.title,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = (if (entry.audio) "Audio" else "Video") + " · " + formatSize(entry.sizeBytes).removePrefix("~"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Row {
+                                TextButton(onClick = { onPlay(entry) }) { Text("Play") }
+                                TextButton(onClick = { toDelete = entry }) { Text("Delete") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    toDelete?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { toDelete = null },
+            title = { Text("Delete this file?") },
+            text = { Text("\"${entry.title}\" will be permanently deleted from this phone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    PrivateStore.delete(entry.id)
+                    toDelete = null
+                }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { toDelete = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+@Composable
+private fun PlayerScreen(entry: PrivateStore.Entry, onClose: () -> Unit) {
+    BackHandler(onBack = onClose)
+    val file = remember(entry.id) { PrivateStore.file(entry) }
+
+    Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    VideoView(ctx).apply {
+                        setMediaController(MediaController(ctx))
+                        setVideoPath(file.absolutePath)
+                        setOnPreparedListener { start() }
+                    }
+                },
+                onRelease = { it.stopPlayback() },
+            )
+            if (entry.audio) {
+                Text(
+                    text = "♪",
+                    color = Color.White,
+                    fontSize = 72.sp,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
+            TextButton(
+                onClick = onClose,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding(),
+            ) { Text("Close", color = Color.White) }
+        }
+    }
+}

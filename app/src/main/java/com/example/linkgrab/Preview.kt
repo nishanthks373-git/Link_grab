@@ -145,7 +145,7 @@ object PreviewRepository {
     }
 
     /** Queues every ticked item with its chosen quality and removes it from the preview list. */
-    fun downloadChecked(): Int {
+    fun downloadChecked(isPrivate: Boolean = false): Int {
         val chosen = _items.value.filter { it.checked && it.state == PreviewState.READY && it.chosen != null }
         if (chosen.isEmpty()) return 0
         val requests = chosen.map {
@@ -156,6 +156,7 @@ object PreviewRepository {
                 height = o.height,
                 title = it.title,
                 thumbnail = it.thumbnail,
+                isPrivate = isPrivate,
             )
         }
         val added = DownloadRepository.enqueue(requests)

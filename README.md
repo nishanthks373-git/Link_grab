@@ -18,6 +18,11 @@ Android app (Kotlin + Jetpack Compose) that downloads video or audio from links.
 2. Let Gradle sync. If prompted, accept the suggested Gradle version.
 3. Run on a device or emulator (Android 10 / API 29 or newer). Use **Build > Build APK(s)** for a shareable APK.
 
+## Private downloads
+Tick **Download privately** in the bar at the bottom before you tap Download. Private files are saved inside the app's own storage instead of Downloads:
+- Other apps, file managers and the gallery can't see or open them. Use the **Private** tab to play or delete them.
+- They are deleted automatically when the app is uninstalled. App backup is turned off, so they can't be restored from a backup either.
+
 ## Build the APK on GitHub (no Android Studio needed)
 The "Build APK" workflow runs on every push (or manually from the Actions tab).
 - On success, the APK is published to the **apk-build** branch as `LinkGrab.apk` and also attached to the run as the **LinkGrab-apk** artifact. Download it from the apk-build branch on GitHub (open `LinkGrab.apk`, then Download raw file), copy it to your phone and install it (allow installs from unknown sources when asked).
