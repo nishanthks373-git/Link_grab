@@ -24,6 +24,12 @@ Tick **Download privately** in the bar at the bottom before you tap Download. Pr
 - The Private tab is locked with your fingerprint (or your phone's screen lock as a fallback). It locks again whenever you leave the app. If your phone has no fingerprint or screen lock set up, the tab stays locked.
 - They are deleted automatically when the app is uninstalled. App backup is turned off, so they can't be restored from a backup either.
 
+## Player
+Private videos open full screen (wide videos turn the phone to landscape). Tap to show or hide the controls, double tap the right side to jump 10 seconds forward and the left side to jump 10 seconds back (keep double tapping to add more), drag the seek bar, and tap the speed button to change playback speed.
+
+## Updating the app
+Install each new APK over the old one, without uninstalling first. Private files stay on the phone through updates because every build uses the same package name and the same signing key (`app/link.keystore`), and each build has a higher version number. Uninstalling the app, or clearing its storage in Android settings, deletes the private files.
+
 ## Build the APK on GitHub (no Android Studio needed)
 The "Build APK" workflow runs on every push (or manually from the Actions tab).
 - On success, the APK is published to the **apk-build** branch as `LinkGrab.apk` and also attached to the run as the **LinkGrab-apk** artifact. Download it from the apk-build branch on GitHub (open `LinkGrab.apk`, then Download raw file), copy it to your phone and install it (allow installs from unknown sources when asked).

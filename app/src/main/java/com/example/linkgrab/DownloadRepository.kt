@@ -2,6 +2,9 @@ package com.example.linkgrab
 
 import android.content.ContentValues
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import com.yausername.ffmpeg.FFmpeg
@@ -137,15 +140,23 @@ object DownloadRepository {
             } else {
                 downloadWithYtDlp(item, tmp)
             }
-            val savedName = if (item.isPrivate) savePrivately(item, file) else saveToDownloads(file)
-            patch(id) {
-                it.copy(
-                    status = Status.DONE,
-                    progress = 1f,
-                    title = savedName,
-                    message = if (item.isPrivate) "Saved privately. Open the Private tab to play it"
-                    else "Saved to Downloads/LinkGrab",
-                )
+            if (item.isPrivate) {
+                savePrivately(item, file)
+                // Private downloads never stay in the Downloads list; they live in the Private tab.
+                _items.update { list -> list.filterNot { it.id == id } }
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(app, "Private download finished", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                val savedName = saveToDownloads(file)
+                patch(id) {
+                    it.copy(
+                        status = Status.DONE,
+                        progress = 1f,
+                        title = savedName,
+                        message = "Saved to Downloads/LinkGrab",
+                    )
+                }
             }
         } catch (e: CancellationException) {
             throw e

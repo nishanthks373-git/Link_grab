@@ -4,6 +4,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// CI sets GITHUB_RUN_NUMBER, so every build has a higher versionCode and installs as an update.
+val buildNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+
 android {
     namespace = "com.example.linkgrab"
     compileSdk = 35
@@ -22,8 +25,8 @@ android {
         applicationId = "com.example.linkgrab"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = buildNumber
+        versionName = "1.0.$buildNumber"
 
         // yt-dlp + ffmpeg ship native binaries; limit to the ABIs phones actually use
         ndk {

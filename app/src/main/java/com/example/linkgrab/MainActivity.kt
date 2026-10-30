@@ -7,6 +7,19 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.content.pm.ActivityInfo
+import android.media.MediaPlayer
+import android.view.WindowManager
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import kotlinx.coroutines.delay
+import java.util.Locale
 import android.widget.MediaController
 import android.widget.Toast
 import android.widget.VideoView
@@ -1033,37 +1046,270 @@ private fun PrivateLibrary(modifier: Modifier = Modifier, onPlay: (PrivateStore.
 @Composable
 private fun PlayerScreen(entry: PrivateStore.Entry, onClose: () -> Unit) {
     BackHandler(onBack = onClose)
+    val context = LocalContext.current
+    val activity = remember { context.findFragmentActivity() }
     val file = remember(entry.id) { PrivateStore.file(entry) }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    VideoView(ctx).apply {
-                        setMediaController(MediaController(ctx))
-                        setVideoPath(file.absolutePath)
-                        setOnPreparedListener { start() }
-                    }
-                },
-                onRelease = { it.stopPlayback() },
-            )
-            if (entry.audio) {
-                Text(
-                    text = "♪",
-                    color = Color.White,
-                    fontSize = 72.sp,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-            }
-            TextButton(
-                onClick = onClose,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .statusBarsPadding(),
-            ) { Text("Close", color = Color.White) }
+    var videoView by remember { mutableStateOf<VideoView?>(null) }
+    var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    var positionMs by remember { mutableStateOf(0) }
+    var durationMs by remember { mutableStateOf(0) }
+    var isPlaying by remember { mutableStateOf(false) }
+    var controlsVisible by remember { mutableStateOf(true) }
+    var interaction by remember { mutableStateOf(0) }
+    var dragging by remember { mutableStateOf(false) }
+    var dragValue by remember { mutableStateOf(0f) }
+    var speed by remember { mutableStateOf(1.0f) }
+    var feedbackSide by remember { mutableStateOf(0) }
+    var feedbackSeconds by remember { mutableStateOf(0) }
+    var feedbackKey by remember { mutableStateOf(0) }
+
+    // Full screen: hide the status and navigation bars and keep the screen on while playing.
+    DisposableEffect(Unit) {
+        val window = activity?.window
+        val controller = window?.let { WindowCompat.getInsetsController(it, it.decorView) }
+        controller?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller?.hide(WindowInsetsCompat.Type.systemBars())
+        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
     }
+
+    // Keep the seek bar and play button in sync with the video.
+    LaunchedEffect(videoView) {
+        val vv = videoView ?: return@LaunchedEffect
+        while (true) {
+            if (!dragging) positionMs = vv.currentPosition
+            durationMs = vv.duration.coerceAtLeast(0)
+            isPlaying = vv.isPlaying
+            delay(250)
+        }
+    }
+
+    // Hide the controls a few seconds after the last touch while playing.
+    LaunchedEffect(controlsVisible, isPlaying, interaction) {
+        if (controlsVisible && isPlaying) {
+            delay(3000)
+            controlsVisible = false
+        }
+    }
+
+    // Fade the "+10s" / "-10s" hint away.
+    LaunchedEffect(feedbackKey) {
+        if (feedbackKey > 0) {
+            delay(700)
+            feedbackSide = 0
+            feedbackSeconds = 0
+        }
+    }
+
+    fun seekBy(deltaMs: Int) {
+        val vv = videoView ?: return
+        val total = vv.duration.coerceAtLeast(0)
+        val target = (vv.currentPosition + deltaMs).coerceIn(0, if (total > 0) total else Int.MAX_VALUE)
+        vv.seekTo(target)
+        positionMs = target
+    }
+
+    fun doubleTapSeek(side: Int) {
+        seekBy(side * 10_000)
+        if (feedbackSide == side) feedbackSeconds += 10 else {
+            feedbackSide = side
+            feedbackSeconds = 10
+        }
+        feedbackKey++
+        interaction++
+    }
+
+    fun togglePlay() {
+        val vv = videoView ?: return
+        if (vv.isPlaying) {
+            vv.pause()
+            isPlaying = false
+        } else {
+            if (durationMs > 0 && vv.currentPosition >= durationMs - 500) vv.seekTo(0)
+            vv.start()
+            isPlaying = true
+        }
+        interaction++
+    }
+
+    fun cycleSpeed() {
+        val options = listOf(1.0f, 1.25f, 1.5f, 2.0f, 0.75f)
+        speed = options[(options.indexOf(speed) + 1) % options.size]
+        val mp = mediaPlayer
+        if (mp != null) {
+            runCatching {
+                val wasPlaying = videoView?.isPlaying == true
+                mp.playbackParams = mp.playbackParams.setSpeed(speed)
+                if (!wasPlaying) videoView?.pause()
+            }
+        }
+        interaction++
+    }
+
+    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                VideoView(ctx).apply {
+                    setVideoPath(file.absolutePath)
+                    setOnPreparedListener { mp ->
+                        mediaPlayer = mp
+                        durationMs = duration
+                        // Wide videos turn the phone to landscape so they fill the screen.
+                        if (mp.videoWidth > mp.videoHeight) {
+                            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        }
+                        start()
+                        isPlaying = true
+                    }
+                    setOnCompletionListener {
+                        isPlaying = false
+                        controlsVisible = true
+                    }
+                }
+            },
+            update = { if (videoView !== it) videoView = it },
+            onRelease = { it.stopPlayback() },
+        )
+
+        // Touch layer: tap shows or hides the controls, double tap left or right seeks 10 seconds.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = {
+                            controlsVisible = !controlsVisible
+                            interaction++
+                        },
+                        onDoubleTap = { offset ->
+                            doubleTapSeek(if (offset.x < size.width / 2f) -1 else 1)
+                        },
+                    )
+                },
+        )
+
+        if (entry.audio) {
+            Text(
+                text = "♪",
+                color = Color.White,
+                fontSize = 72.sp,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(bottom = 180.dp),
+            )
+        }
+
+        if (feedbackSide != 0) {
+            Text(
+                text = if (feedbackSide < 0) "« ${feedbackSeconds}s" else "${feedbackSeconds}s »",
+                color = Color.White,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(if (feedbackSide < 0) Alignment.CenterStart else Alignment.CenterEnd)
+                    .padding(horizontal = 48.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+            )
+        }
+
+        AnimatedVisibility(
+            visible = controlsVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f))) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    IconButton(onClick = onClose) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                    }
+                    Text(
+                        text = entry.title,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    val speedLabel = (if (speed % 1f == 0f) speed.toInt().toString() else speed.toString()) + "x"
+                    Box(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.2f))
+                            .clickable { cycleSpeed() }
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                    ) { Text(speedLabel, color = Color.White, fontWeight = FontWeight.Medium) }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(72.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.2f))
+                        .clickable { togglePlay() },
+                    contentAlignment = Alignment.Center,
+                ) { Text(if (isPlaying) "❚❚" else "▶", color = Color.White, fontSize = 28.sp) }
+
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(clock(if (dragging) dragValue.toInt() else positionMs), color = Color.White, fontSize = 12.sp)
+                    Slider(
+                        value = if (dragging) dragValue else positionMs.toFloat(),
+                        onValueChange = {
+                            dragging = true
+                            dragValue = it
+                            interaction++
+                        },
+                        onValueChangeFinished = {
+                            videoView?.seekTo(dragValue.toInt())
+                            positionMs = dragValue.toInt()
+                            dragging = false
+                        },
+                        valueRange = 0f..maxOf(durationMs, 1).toFloat(),
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color.White,
+                            activeTrackColor = Color.White,
+                            inactiveTrackColor = Color.White.copy(alpha = 0.3f),
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 8.dp),
+                    )
+                    Text(clock(durationMs), color = Color.White, fontSize = 12.sp)
+                }
+            }
+        }
+    }
+}
+
+private fun clock(ms: Int): String {
+    val total = ms / 1000
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val sec = total % 60
+    return if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, sec)
+    else String.format(Locale.US, "%d:%02d", m, sec)
 }
 
 // ======================================================================= lock
