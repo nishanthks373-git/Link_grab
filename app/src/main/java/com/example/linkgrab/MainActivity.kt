@@ -242,6 +242,7 @@ private fun MainScreen() {
     var hiddenOpen by remember { mutableStateOf(false) }
     var unlockRequest by remember { mutableStateOf(0) }
     var dialogId by remember { mutableStateOf<Long?>(null) }
+    var bulkAsk by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf<PendingDownload?>(null) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
@@ -349,6 +350,34 @@ private fun MainScreen() {
         return
     }
 
+    if (bulkAsk) {
+        var hidden by remember { mutableStateOf(false) }
+        val ids = selected.map { it.id }
+        AlertDialog(
+            onDismissRequest = { bulkAsk = false },
+            title = { Text("Download ${ids.size} item(s)", fontWeight = FontWeight.Bold) },
+            text = {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { hidden = !hidden },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = hidden, onCheckedChange = { hidden = it })
+                    Text("Download privately", fontWeight = FontWeight.Medium)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    bulkAsk = false
+                    startDownload(ids, hidden)
+                }) { Text("Download", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { bulkAsk = false }) { Text("Cancel") } },
+        )
+    }
+
     dialogId?.let { id ->
         val item = previews.firstOrNull { it.id == id }
         if (item == null || item.state != PreviewState.READY) dialogId = null
@@ -427,7 +456,7 @@ private fun MainScreen() {
                     count = selected.size,
                     knownBytes = knownBytes,
                     unknownCount = unknownCount,
-                    onDownload = { startDownload(selected.map { it.id }) },
+                    onDownload = { bulkAsk = true },
                 )
             }
         },
@@ -445,6 +474,12 @@ private fun MainScreen() {
                 DownloadedLibrary(
                     modifier = sideModifier.nestedScroll(pullConnection),
                     onPlay = { playing = PlayTarget(it.id, it.title, it.audio, Uri.parse(it.uri), false) },
+                    onMove = { entry ->
+                        scope.launch {
+                            val ok = withContext(Dispatchers.IO) { DownloadedStore.moveToHidden(entry) }
+                            toast(if (ok) "Moved" else "Couldn't move that file")
+                        }
+                    },
                 )
             }
         } else LazyColumn(
@@ -1447,10 +1482,15 @@ private fun DownloadIconButton(onClick: () -> Unit) {
 class PlayTarget(val id: String, val title: String, val audio: Boolean, val uri: Uri, val hidden: Boolean)
 
 @Composable
-private fun DownloadedLibrary(modifier: Modifier = Modifier, onPlay: (DownloadedStore.Entry) -> Unit) {
+private fun DownloadedLibrary(
+    modifier: Modifier = Modifier,
+    onPlay: (DownloadedStore.Entry) -> Unit,
+    onMove: (DownloadedStore.Entry) -> Unit,
+) {
     val cs = MaterialTheme.colorScheme
     val entries by DownloadedStore.entries.collectAsState()
     var toDelete by remember { mutableStateOf<DownloadedStore.Entry?>(null) }
+    var toMove by remember { mutableStateOf<DownloadedStore.Entry?>(null) }
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -1527,11 +1567,30 @@ private fun DownloadedLibrary(modifier: Modifier = Modifier, onPlay: (Downloaded
                                     Text("Delete", color = cs.error)
                                 }
                             }
+                            TextButton(
+                                onClick = { toMove = entry },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            ) { Text("Move to private") }
                         }
                     }
                 }
             }
         }
+    }
+
+    toMove?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { toMove = null },
+            title = { Text("Move to private?") },
+            text = { Text("\"${entry.title}\" will be removed from Downloads, so other apps and the gallery can no longer see it.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onMove(entry)
+                    toMove = null
+                }) { Text("Move", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { toMove = null }) { Text("Cancel") } },
+        )
     }
 
     toDelete?.let { entry ->

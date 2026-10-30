@@ -66,6 +66,31 @@ object DownloadedStore {
         }
     }
 
+    /**
+     * Moves a normal download into the app-only storage and removes it from Downloads, so no other
+     * app can see it any more. Returns false if the copy failed (nothing is removed then).
+     */
+    fun moveToHidden(entry: Entry): Boolean {
+        val uri = Uri.parse(entry.uri)
+        val name = runCatching {
+            app.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { if (it.moveToFirst()) it.getString(0) else null }
+        }.getOrNull()
+        val ext = name?.substringAfterLast('.', "").orEmpty().ifBlank { "bin" }
+        val tmp = File(app.cacheDir, "move_${entry.id}.$ext")
+        return try {
+            app.contentResolver.openInputStream(uri)?.use { i -> tmp.outputStream().use { i.copyTo(it) } }
+                ?: return false
+            PrivateStore.save(tmp, entry.title, entry.audio, thumb(entry)?.readBytes())
+            delete(entry.id)
+            true
+        } catch (e: Throwable) {
+            false
+        } finally {
+            tmp.delete()
+        }
+    }
+
     /** Drops entries whose file no longer exists (deleted with a file manager, for example). */
     fun verify() {
         synchronized(lock) {
