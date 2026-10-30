@@ -2,6 +2,7 @@ package com.example.linkgrab
 
 import android.Manifest
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -15,7 +16,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -59,6 +60,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -80,7 +82,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* optional */ }
@@ -103,6 +105,12 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleShare(intent)
+    }
+
+    /** Leaving the app locks the private files again. */
+    override fun onStop() {
+        super.onStop()
+        PrivateLock.relock()
     }
 
     /** Links shared into the app from a browser or another app go to the preview list. */
@@ -132,6 +140,7 @@ private fun MainScreen() {
     var privateMode by remember { mutableStateOf(false) }
     var playing by remember { mutableStateOf<PrivateStore.Entry?>(null) }
     val privateEntries by PrivateStore.entries.collectAsState()
+    var lockMessage by remember { mutableStateOf<String?>(null) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
 
@@ -159,6 +168,27 @@ private fun MainScreen() {
     val knownBytes = selected.sumOf { it.chosen?.sizeBytes ?: 0L }
     val unknownCount = selected.count { (it.chosen?.sizeBytes ?: 0L) <= 0L }
 
+    fun tryUnlock() {
+        val activity = context.findFragmentActivity() ?: return
+        when (PrivateLock.availability(context)) {
+            PrivateLock.Availability.OK ->
+                PrivateLock.authenticate(activity) { ok, error -> lockMessage = if (ok) null else error }
+            PrivateLock.Availability.NOT_SET_UP ->
+                lockMessage = "Set up a fingerprint or screen lock in your phone's settings to open private files."
+            PrivateLock.Availability.UNAVAILABLE ->
+                lockMessage = "Fingerprint and screen lock aren't available on this phone right now."
+        }
+    }
+
+    // Ask for the fingerprint as soon as the Private tab opens.
+    LaunchedEffect(tab) {
+        if (tab == 1 && !PrivateLock.unlocked) tryUnlock()
+    }
+    // If the app locks again (for example after going to the background), close the player.
+    LaunchedEffect(PrivateLock.unlocked) {
+        if (!PrivateLock.unlocked) playing = null
+    }
+
     playing?.let { entry ->
         PlayerScreen(entry) { playing = null }
         return
@@ -170,7 +200,7 @@ private fun MainScreen() {
                 TopAppBar(title = { Text("LinkGrab") })
                 TabRow(selectedTabIndex = tab) {
                     Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Download") })
-                    Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Private (${privateEntries.size})") })
+                    Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text(if (PrivateLock.unlocked) "Private (${privateEntries.size})" else "Private") })
                 }
             }
         },
@@ -225,12 +255,14 @@ private fun MainScreen() {
         },
     ) { padding ->
         if (tab == 1) {
-            PrivateLibrary(
-                modifier = Modifier
-                    .padding(padding)
-                    .padding(horizontal = 16.dp),
-                onPlay = { playing = it },
-            )
+            val sideModifier = Modifier
+                .padding(padding)
+                .padding(horizontal = 16.dp)
+            if (PrivateLock.unlocked) {
+                PrivateLibrary(modifier = sideModifier, onPlay = { playing = it })
+            } else {
+                LockedPanel(modifier = sideModifier, message = lockMessage, onUnlock = { tryUnlock() })
+            }
         } else LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -643,4 +675,35 @@ private fun PlayerScreen(entry: PrivateStore.Entry, onClose: () -> Unit) {
             ) { Text("Close", color = Color.White) }
         }
     }
+}
+
+
+// ======================================================================= lock
+
+@Composable
+private fun LockedPanel(modifier: Modifier = Modifier, message: String?, onUnlock: () -> Unit) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(top = 48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Private files are locked", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = message ?: "Use your fingerprint or screen lock to open them.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Button(onClick = onUnlock) { Text("Unlock") }
+    }
+}
+
+private fun Context.findFragmentActivity(): FragmentActivity? {
+    var c: Context = this
+    while (c is ContextWrapper) {
+        if (c is FragmentActivity) return c
+        c = c.baseContext
+    }
+    return null
 }

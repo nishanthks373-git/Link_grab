@@ -21,6 +21,7 @@ Android app (Kotlin + Jetpack Compose) that downloads video or audio from links.
 ## Private downloads
 Tick **Download privately** in the bar at the bottom before you tap Download. Private files are saved inside the app's own storage instead of Downloads:
 - Other apps, file managers and the gallery can't see or open them. Use the **Private** tab to play or delete them.
+- The Private tab is locked with your fingerprint (or your phone's screen lock as a fallback). It locks again whenever you leave the app. If your phone has no fingerprint or screen lock set up, the tab stays locked.
 - They are deleted automatically when the app is uninstalled. App backup is turned off, so they can't be restored from a backup either.
 
 ## Build the APK on GitHub (no Android Studio needed)
