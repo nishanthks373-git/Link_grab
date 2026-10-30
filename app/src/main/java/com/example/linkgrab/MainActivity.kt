@@ -13,6 +13,8 @@ import android.view.WindowManager
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material3.Slider
 import androidx.compose.material3.RadioButton
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -465,10 +467,16 @@ private fun MainScreen() {
                     modifier = sideModifier,
                     onPull = onPull,
                     onPlay = { playing = PlayTarget(it.id, it.title, it.audio, Uri.parse(it.uri), false) },
-                    onMove = { entry ->
+                    onMove = { list ->
                         scope.launch {
-                            val ok = withContext(Dispatchers.IO) { DownloadedStore.moveToHidden(entry) }
-                            toast(if (ok) "Moved" else "Couldn't move that file")
+                            val n = withContext(Dispatchers.IO) { list.count { DownloadedStore.moveToHidden(it) } }
+                            toast(
+                                when {
+                                    n == list.size -> "Moved"
+                                    n == 0 -> "Couldn't move that file"
+                                    else -> "Moved $n of ${list.size}"
+                                }
+                            )
                         }
                     },
                 )
@@ -1472,23 +1480,56 @@ private fun DownloadIconButton(onClick: () -> Unit) {
 
 class PlayTarget(val id: String, val title: String, val audio: Boolean, val uri: Uri, val hidden: Boolean)
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DownloadedLibrary(
     modifier: Modifier = Modifier,
     onPlay: (DownloadedStore.Entry) -> Unit,
-    onMove: (DownloadedStore.Entry) -> Unit,
+    onMove: (List<DownloadedStore.Entry>) -> Unit,
     onPull: () -> Unit,
 ) {
     val listState = rememberLazyListState()
     val cs = MaterialTheme.colorScheme
     val entries by DownloadedStore.entries.collectAsState()
-    var toDelete by remember { mutableStateOf<DownloadedStore.Entry?>(null) }
-    var toMove by remember { mutableStateOf<DownloadedStore.Entry?>(null) }
+    val scope = rememberCoroutineScope()
+    var toDelete by remember { mutableStateOf<List<DownloadedStore.Entry>?>(null) }
+    var toMove by remember { mutableStateOf<List<DownloadedStore.Entry>?>(null) }
+    var picked by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // Forget picks for files that are gone.
+    val chosen = entries.filter { it.id in picked }
+    val selecting = chosen.isNotEmpty()
+    BackHandler(enabled = selecting) { picked = emptySet() }
+    fun toggle(id: String) {
+        picked = if (id in picked) picked - id else picked + id
+    }
 
+    Column(modifier = modifier.fillMaxSize()) {
+    if (selecting) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("${chosen.size} selected", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            TextButton(
+                onClick = { picked = if (chosen.size == entries.size) emptySet() else entries.map { it.id }.toSet() },
+                contentPadding = PaddingValues(horizontal = 8.dp),
+            ) { Text(if (chosen.size == entries.size) "None" else "All") }
+            TextButton(onClick = { toMove = chosen }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Move to private") }
+            TextButton(onClick = { toDelete = chosen }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Text("Delete", color = cs.error)
+            }
+            IconButton(onClick = { picked = emptySet() }, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.Close, contentDescription = "Cancel")
+            }
+        }
+    }
     LazyColumn(
         state = listState,
-        modifier = modifier
-            .fillMaxSize()
+        modifier = Modifier
+            .weight(1f)
+            .fillMaxWidth()
             // Watches (without consuming) for a downward drag that starts with the list at the top.
             .pointerInput(Unit) {
                 awaitEachGesture {
@@ -1528,15 +1569,28 @@ private fun DownloadedLibrary(
             }
         }
         items(entries.asReversed(), key = { it.id }) { entry ->
+            val isPicked = entry.id in picked
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
                     .animateItem(),
                 shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = cs.surface),
-                border = BorderStroke(1.dp, cs.outline.copy(alpha = 0.25f)),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isPicked) cs.primaryContainer.copy(alpha = 0.45f) else cs.surface,
+                ),
+                border = BorderStroke(
+                    if (isPicked) 1.5.dp else 1.dp,
+                    if (isPicked) cs.primary else cs.outline.copy(alpha = 0.25f),
+                ),
             ) {
-                Row(modifier = Modifier.height(IntrinsicSize.Min)) {
+                Row(
+                    modifier = Modifier
+                        .height(IntrinsicSize.Min)
+                        .combinedClickable(
+                            onClick = { if (selecting) toggle(entry.id) },
+                            onLongClick = { toggle(entry.id) },
+                        ),
+                ) {
                     Box(
                         modifier = Modifier
                             .width(6.dp)
@@ -1546,7 +1600,11 @@ private fun DownloadedLibrary(
                     Row(
                         modifier = Modifier.padding(10.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.Top,
                     ) {
+                        if (selecting) {
+                            Checkbox(checked = isPicked, onCheckedChange = { toggle(entry.id) })
+                        }
                         Thumb(DownloadedStore.thumb(entry), null, width = 96.dp)
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(
@@ -1568,34 +1626,39 @@ private fun DownloadedLibrary(
                                     cs.onSurfaceVariant,
                                 )
                             }
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                FilledTonalButton(
-                                    onClick = { onPlay(entry) },
-                                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-                                ) { Text("Play") }
-                                TextButton(onClick = { toDelete = entry }) {
-                                    Text("Delete", color = cs.error)
+                            if (!selecting) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    FilledTonalButton(
+                                        onClick = { onPlay(entry) },
+                                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                                    ) { Text("Play") }
+                                    TextButton(onClick = { toDelete = listOf(entry) }) {
+                                        Text("Delete", color = cs.error)
+                                    }
                                 }
+                                TextButton(
+                                    onClick = { toMove = listOf(entry) },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                ) { Text("Move to private") }
                             }
-                            TextButton(
-                                onClick = { toMove = entry },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                            ) { Text("Move to private") }
                         }
                     }
                 }
             }
         }
     }
+    }
 
-    toMove?.let { entry ->
+    toMove?.let { list ->
+        val label = if (list.size == 1) "\"${list[0].title}\"" else "${list.size} files"
         AlertDialog(
             onDismissRequest = { toMove = null },
             title = { Text("Move to private?") },
-            text = { Text("\"${entry.title}\" will be removed from Downloads, so other apps and the gallery can no longer see it.") },
+            text = { Text("$label will be removed from Downloads, so other apps and the gallery can no longer see ${if (list.size == 1) "it" else "them"}.") },
             confirmButton = {
                 TextButton(onClick = {
-                    onMove(entry)
+                    onMove(list)
+                    picked = emptySet()
                     toMove = null
                 }) { Text("Move", fontWeight = FontWeight.Bold) }
             },
@@ -1603,15 +1666,17 @@ private fun DownloadedLibrary(
         )
     }
 
-    toDelete?.let { entry ->
+    toDelete?.let { list ->
+        val label = if (list.size == 1) "\"${list[0].title}\"" else "${list.size} files"
         AlertDialog(
             onDismissRequest = { toDelete = null },
-            title = { Text("Delete this file?") },
-            text = { Text("\"${entry.title}\" will be permanently deleted from this phone.") },
+            title = { Text(if (list.size == 1) "Delete this file?" else "Delete ${list.size} files?") },
+            text = { Text("$label will be permanently deleted from this phone.") },
             confirmButton = {
                 TextButton(onClick = {
-                    DownloadedStore.delete(entry.id)
                     toDelete = null
+                    picked = emptySet()
+                    scope.launch(Dispatchers.IO) { list.forEach { DownloadedStore.delete(it.id) } }
                 }) { Text("Delete", color = cs.error) }
             },
             dismissButton = { TextButton(onClick = { toDelete = null }) { Text("Cancel") } },
