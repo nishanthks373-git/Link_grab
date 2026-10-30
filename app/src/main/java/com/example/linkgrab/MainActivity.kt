@@ -233,8 +233,28 @@ private fun MainScreen() {
     var playing by remember { mutableStateOf<PrivateStore.Entry?>(null) }
     val privateEntries by PrivateStore.entries.collectAsState()
     var lockMessage by remember { mutableStateOf<String?>(null) }
+    var pending by remember { mutableStateOf<PendingDownload?>(null) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+
+    fun finishDownload(p: PendingDownload, choice: DuplicateChoice) {
+        val n = PreviewRepository.commit(p, choice)
+        toast(
+            if (n > 0) "Downloading $n item(s)" + (if (privateMode) " privately" else "")
+            else "Nothing new to download"
+        )
+    }
+
+    /** Starts downloading the given preview items, asking first if a file with the same name exists. */
+    fun startDownload(ids: List<Long>) {
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        val p = PreviewRepository.prepare(ids, privateMode)
+        when {
+            p == null -> toast("Nothing to download")
+            p.duplicateIndexes.isEmpty() -> finishDownload(p, DuplicateChoice.RENAME)
+            else -> pending = p
+        }
+    }
 
     /** Returns true if any link was found. */
     fun fetchFromText(text: String): Boolean {
@@ -288,6 +308,43 @@ private fun MainScreen() {
     val totalSpeed = queue.filter { it.status == Status.RUNNING }.sumOf { it.speedBps }
     val activeCount = queue.count { it.isActive }
 
+    pending?.let { p ->
+        val dupTitles = p.duplicateIndexes.sorted().map { p.requests[it].title ?: p.requests[it].url }
+        val others = p.requests.size - dupTitles.size
+        AlertDialog(
+            onDismissRequest = { pending = null },
+            title = { Text(if (dupTitles.size == 1) "File already exists" else "${dupTitles.size} files already exist") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("You already have, or are already downloading:")
+                    dupTitles.take(4).forEach {
+                        Text("• $it", maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                    }
+                    if (dupTitles.size > 4) Text("and ${dupTitles.size - 4} more")
+                    Spacer(Modifier.height(4.dp))
+                    Text("Download again as a new copy with _1 added to the name?")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    finishDownload(p, DuplicateChoice.RENAME)
+                    pending = null
+                }) { Text("Download as _1", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                Row {
+                    if (others > 0) {
+                        TextButton(onClick = {
+                            finishDownload(p, DuplicateChoice.SKIP)
+                            pending = null
+                        }) { Text("Skip duplicates") }
+                    }
+                    TextButton(onClick = { pending = null }) { Text("Cancel") }
+                }
+            },
+        )
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -310,18 +367,7 @@ private fun MainScreen() {
                     knownBytes = knownBytes,
                     unknownCount = unknownCount,
                     privateMode = privateMode,
-                    onPrivateChange = {
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        privateMode = it
-                    },
-                    onDownload = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        val n = PreviewRepository.downloadChecked(privateMode)
-                        toast(
-                            if (n > 0) "Downloading $n item(s)" + (if (privateMode) " privately" else "")
-                            else "Already in the queue"
-                        )
-                    },
+                    onDownload = { startDownload(selected.map { it.id }) },
                 )
             }
         },
@@ -386,8 +432,19 @@ private fun MainScreen() {
 
             // ---------------------------------------------------------- preview section
             if (previews.isNotEmpty()) {
-                item(key = "preview-header") { PreviewHeader(count = previews.size) }
-                items(previews, key = { "p${it.id}" }) { PreviewCard(it, Modifier.animateItem()) }
+                item(key = "preview-header") {
+                    PreviewHeader(
+                        count = previews.size,
+                        privateMode = privateMode,
+                        onPrivateChange = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            privateMode = it
+                        },
+                    )
+                }
+                items(previews, key = { "p${it.id}" }) {
+                    PreviewCard(it, Modifier.animateItem(), onDownload = { startDownload(listOf(it.id)) })
+                }
             }
 
             // ------------------------------------------------------------ queue section
@@ -511,7 +568,6 @@ private fun DownloadBar(
     knownBytes: Long,
     unknownCount: Int,
     privateMode: Boolean,
-    onPrivateChange: (Boolean) -> Unit,
     onDownload: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
@@ -532,24 +588,15 @@ private fun DownloadBar(
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable { onPrivateChange(!privateMode) },
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Checkbox(checked = privateMode, onCheckedChange = onPrivateChange)
-                Column {
-                    Text("Download privately", color = content, fontWeight = FontWeight.Medium)
-                    Text(
-                        "Only visible and playable inside this app",
-                        color = content.copy(alpha = 0.75f),
-                        fontSize = 12.sp,
-                    )
-                }
+            if (privateMode) {
+                Text(
+                    "Private mode: files are saved inside this app only",
+                    color = content,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                Spacer(Modifier.height(8.dp))
             }
-            Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text("$count selected", color = content, fontWeight = FontWeight.Bold)
@@ -625,7 +672,7 @@ private fun EmptyState() {
 // ================================================================ preview section
 
 @Composable
-private fun PreviewHeader(count: Int) {
+private fun PreviewHeader(count: Int, privateMode: Boolean, onPrivateChange: (Boolean) -> Unit) {
     var menuOpen by remember { mutableStateOf(false) }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -662,11 +709,12 @@ private fun PreviewHeader(count: Int) {
             Box(modifier = Modifier.weight(1f))
             TextButton(onClick = { PreviewRepository.clear() }) { Text("Clear") }
         }
+        PrivateToggle(privateMode, onPrivateChange)
     }
 }
 
 @Composable
-private fun PreviewCard(item: PreviewItem, modifier: Modifier = Modifier) {
+private fun PreviewCard(item: PreviewItem, modifier: Modifier = Modifier, onDownload: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     val haptic = LocalHapticFeedback.current
     val ready = item.state == PreviewState.READY
@@ -736,8 +784,14 @@ private fun PreviewCard(item: PreviewItem, modifier: Modifier = Modifier) {
                     PreviewState.READY -> QualityDropdown(item)
                 }
             }
-            IconButton(onClick = { PreviewRepository.remove(item.id) }, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "Remove")
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                IconButton(onClick = { PreviewRepository.remove(item.id) }, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = "Remove")
+                }
+                if (ready) DownloadIconButton(onClick = onDownload)
             }
         }
     }
@@ -1359,3 +1413,57 @@ private fun readText(context: Context, uri: Uri): String? =
     runCatching {
         context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
     }.getOrNull()
+
+
+/** Round download button drawn with a canvas (arrow into a tray). */
+@Composable
+private fun DownloadIconButton(onClick: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    val glyph = cs.onPrimary
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .background(cs.primary)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(modifier = Modifier.size(18.dp)) {
+            val s = this.size.minDimension / 24f
+            val w = 2.6f * s
+            drawLine(glyph, Offset(12 * s, 3 * s), Offset(12 * s, 15 * s), strokeWidth = w, cap = StrokeCap.Round)
+            drawLine(glyph, Offset(6 * s, 10 * s), Offset(12 * s, 16 * s), strokeWidth = w, cap = StrokeCap.Round)
+            drawLine(glyph, Offset(18 * s, 10 * s), Offset(12 * s, 16 * s), strokeWidth = w, cap = StrokeCap.Round)
+            drawLine(glyph, Offset(5 * s, 21 * s), Offset(19 * s, 21 * s), strokeWidth = w, cap = StrokeCap.Round)
+        }
+    }
+}
+
+@Composable
+private fun PrivateToggle(checked: Boolean, onChange: (Boolean) -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    val bg by animateColorAsState(
+        if (checked) cs.tertiaryContainer else cs.surfaceVariant,
+        label = "privateToggle",
+    )
+    val fg = if (checked) cs.onTertiaryContainer else cs.onSurfaceVariant
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(bg)
+            .clickable { onChange(!checked) }
+            .padding(end = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = checked, onCheckedChange = onChange)
+        Column {
+            Text("Download privately", color = fg, fontWeight = FontWeight.Medium)
+            Text(
+                "Saved inside this app only, hidden from the gallery and other apps",
+                color = fg.copy(alpha = 0.8f),
+                fontSize = 12.sp,
+            )
+        }
+    }
+}

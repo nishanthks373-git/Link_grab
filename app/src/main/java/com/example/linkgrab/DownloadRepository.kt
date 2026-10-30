@@ -57,11 +57,13 @@ object DownloadRepository {
 
     /** Adds chosen downloads to the queue. Returns how many were new (identical active ones are skipped). */
     fun enqueue(requests: List<QueueRequest>): Int {
-        val alreadyActive = _items.value.filter { it.isActive }.map { listOf(it.url, it.mode, it.height, it.isPrivate) }.toSet()
-        val fresh = requests.filter { listOf(it.url, it.mode, it.height, it.isPrivate) !in alreadyActive }
+        val alreadyActive = _items.value.filter { it.isActive }
+            .map { listOf(it.url, it.mode, it.height, it.isPrivate, it.baseName) }.toSet()
+        val fresh = requests.filter { listOf(it.url, it.mode, it.height, it.isPrivate, planName(it).first) !in alreadyActive }
         if (fresh.isEmpty()) return 0
 
         val newItems = fresh.map {
+            val (base, ext) = planName(it)
             DownloadItem(
                 id = nextId.getAndIncrement(),
                 url = it.url,
@@ -70,12 +72,85 @@ object DownloadRepository {
                 title = it.title,
                 thumbnail = it.thumbnail,
                 isPrivate = it.isPrivate,
+                baseName = base,
+                ext = ext,
             )
         }
         _items.update { it + newItems }
         DownloadService.start(app)
         newItems.forEach { launchJob(it.id) }
         return newItems.size
+    }
+
+    // ------------------------------------------------------- file names and duplicates
+
+    /** Removes characters that can't go in a file name. */
+    fun safeName(raw: String): String {
+        val cleaned = raw.replace(Regex("""[\\/:*?"<>|\p{Cntrl}]"""), "_")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+            .trim('.')
+        return cleaned.take(150).trim().ifBlank { "download" }
+    }
+
+    /** The (name without extension, extension) a request will be saved as. */
+    fun planName(r: QueueRequest): Pair<String, String> {
+        val (base, ext) = if (LinkParser.useDirect(r.url, r.mode)) {
+            val seg = safeName(android.net.Uri.parse(r.url).lastPathSegment ?: "download")
+            val f = File(seg)
+            f.nameWithoutExtension.ifBlank { "download" } to f.extension.ifBlank { "bin" }
+        } else {
+            safeName(r.title ?: android.net.Uri.parse(r.url).host ?: "download") to
+                (if (r.mode == Mode.AUDIO) "mp3" else "mp4")
+        }
+        return (r.baseName ?: base) to ext
+    }
+
+    /** True if a file with this name is already saved, or is queued to be saved. */
+    private fun nameTaken(base: String, ext: String, isPrivate: Boolean): Boolean {
+        val queued = _items.value.any {
+            it.isActive && it.isPrivate == isPrivate &&
+                it.baseName.equals(base, ignoreCase = true) && it.ext.equals(ext, ignoreCase = true)
+        }
+        if (queued) return true
+        return if (isPrivate) PrivateStore.exists(base, ext) else existsInDownloads("$base.$ext")
+    }
+
+    private fun existsInDownloads(displayName: String): Boolean = runCatching {
+        app.contentResolver.query(
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.Downloads._ID),
+            "${MediaStore.Downloads.DISPLAY_NAME}=? AND ${MediaStore.Downloads.RELATIVE_PATH} LIKE ?",
+            arrayOf(displayName, "Download/LinkGrab%"),
+            null,
+        )?.use { it.count > 0 } ?: false
+    }.getOrDefault(false)
+
+    /** Indexes of requests whose file name already exists, is queued, or repeats earlier in the batch. */
+    fun duplicateIndexes(requests: List<QueueRequest>): Set<Int> {
+        val seen = HashSet<String>()
+        val dups = HashSet<Int>()
+        requests.forEachIndexed { i, r ->
+            val (base, ext) = planName(r)
+            val key = "${r.isPrivate}|${base.lowercase()}.${ext.lowercase()}"
+            if (!seen.add(key) || nameTaken(base, ext, r.isPrivate)) dups += i
+        }
+        return dups
+    }
+
+    /** A copy of [r] named "<name>_1", "<name>_2"... whichever is free. [taken] tracks names used in this batch. */
+    fun renamedCopy(r: QueueRequest, taken: MutableSet<String>): QueueRequest {
+        val (base, ext) = planName(r)
+        var n = 1
+        while (true) {
+            val candidate = "${base}_$n"
+            val key = "$candidate.$ext".lowercase()
+            if (key !in taken && !nameTaken(candidate, ext, r.isPrivate)) {
+                taken += key
+                return r.copy(baseName = candidate)
+            }
+            n++
+        }
     }
 
     fun cancel(id: Long) {
@@ -148,7 +223,7 @@ object DownloadRepository {
                     Toast.makeText(app, "Private download finished", Toast.LENGTH_SHORT).show()
                 }
             } else {
-                val savedName = saveToDownloads(file)
+                val savedName = saveToDownloads(file, "${item.baseName.ifBlank { file.nameWithoutExtension }}.${file.extension.ifBlank { item.ext }}")
                 patch(id) {
                     it.copy(
                         status = Status.DONE,
@@ -185,7 +260,7 @@ object DownloadRepository {
             val body = response.body ?: error("Empty response")
             val total = body.contentLength()
 
-            val name = fileNameFor(item, response.header("Content-Disposition"))
+            val name = "${item.baseName.ifBlank { "download" }}.${item.ext.ifBlank { "bin" }}"
             val out = File(dir, name)
             patchIfRunning(item.id) { it.copy(title = name) }
 
@@ -266,7 +341,7 @@ object DownloadRepository {
         val request = YoutubeDLRequest(item.url).apply {
             addOption("--no-playlist")
             addOption("--no-mtime")
-            addOption("-o", "${dir.absolutePath}/%(title).150s.%(ext)s")
+            addOption("-o", "${dir.absolutePath}/${item.baseName.ifBlank { "download" }.replace("%", "%%")}.%(ext)s")
             if (item.mode == Mode.AUDIO) {
                 addOption("-x")
                 addOption("--audio-format", "mp3")
@@ -314,7 +389,7 @@ object DownloadRepository {
                 }
             }.getOrNull()
         }
-        val title = file.nameWithoutExtension
+        val title = item.baseName.ifBlank { file.nameWithoutExtension }
         PrivateStore.save(file, title, item.mode == Mode.AUDIO, thumbBytes)
         return title
     }
@@ -322,13 +397,13 @@ object DownloadRepository {
     // --------------------------------------------------------- save to Downloads
 
     /** Copies the finished file into Downloads/LinkGrab via MediaStore (no storage permission needed). */
-    private fun saveToDownloads(file: File): String {
+    private fun saveToDownloads(file: File, displayName: String = file.name): String {
         val ext = file.extension.lowercase()
         val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
         val resolver = app.contentResolver
 
         val values = ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, file.name)
+            put(MediaStore.Downloads.DISPLAY_NAME, displayName)
             put(MediaStore.Downloads.MIME_TYPE, mime)
             put(MediaStore.Downloads.RELATIVE_PATH, "Download/LinkGrab")
             put(MediaStore.Downloads.IS_PENDING, 1)
@@ -349,6 +424,6 @@ object DownloadRepository {
             resolver.delete(uri, null, null)
             throw e
         }
-        return file.name
+        return displayName
     }
 }

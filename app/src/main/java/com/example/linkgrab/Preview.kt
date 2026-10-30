@@ -32,6 +32,15 @@ data class QualityOption(
 
 enum class PreviewState { LOADING, READY, ERROR }
 
+enum class DuplicateChoice { RENAME, SKIP }
+
+/** Downloads waiting for the user's answer about files that already exist. */
+class PendingDownload(
+    val requests: List<QueueRequest>,
+    val ids: List<Long>,
+    val duplicateIndexes: Set<Int>,
+)
+
 data class PreviewItem(
     val id: Long,
     val url: String,
@@ -144,10 +153,16 @@ object PreviewRepository {
         }
     }
 
-    /** Queues every ticked item with its chosen quality and removes it from the preview list. */
-    fun downloadChecked(isPrivate: Boolean = false): Int {
-        val chosen = _items.value.filter { it.checked && it.state == PreviewState.READY && it.chosen != null }
-        if (chosen.isEmpty()) return 0
+    /**
+     * Builds download requests for the given preview items (in list order) and works out which
+     * of them would clash with a file you already have, are already downloading, or repeat in the batch.
+     */
+    fun prepare(ids: List<Long>, isPrivate: Boolean): PendingDownload? {
+        val wanted = ids.toSet()
+        val chosen = _items.value.filter {
+            it.id in wanted && it.state == PreviewState.READY && it.chosen != null
+        }
+        if (chosen.isEmpty()) return null
         val requests = chosen.map {
             val o = it.chosen!!
             QueueRequest(
@@ -159,9 +174,38 @@ object PreviewRepository {
                 isPrivate = isPrivate,
             )
         }
-        val added = DownloadRepository.enqueue(requests)
-        val ids = chosen.map { it.id }.toSet()
-        _items.update { list -> list.filterNot { it.id in ids } }
+        return PendingDownload(requests, chosen.map { it.id }, DownloadRepository.duplicateIndexes(requests))
+    }
+
+    /**
+     * Queues the requests and removes them from the preview list. Duplicates are saved with
+     * _1, _2... added to the name ([DuplicateChoice.RENAME]) or left out ([DuplicateChoice.SKIP]).
+     */
+    fun commit(pending: PendingDownload, choice: DuplicateChoice): Int {
+        val taken = HashSet<String>()
+        pending.requests.forEachIndexed { i, r ->
+            if (i !in pending.duplicateIndexes) {
+                val (base, ext) = DownloadRepository.planName(r)
+                taken += "$base.$ext".lowercase()
+            }
+        }
+        val toQueue = ArrayList<QueueRequest>()
+        val queuedIds = HashSet<Long>()
+        pending.requests.forEachIndexed { i, r ->
+            when {
+                i !in pending.duplicateIndexes -> {
+                    toQueue += r
+                    queuedIds += pending.ids[i]
+                }
+                choice == DuplicateChoice.RENAME -> {
+                    toQueue += DownloadRepository.renamedCopy(r, taken)
+                    queuedIds += pending.ids[i]
+                }
+                else -> Unit
+            }
+        }
+        val added = DownloadRepository.enqueue(toQueue)
+        _items.update { list -> list.filterNot { it.id in queuedIds } }
         return added
     }
 

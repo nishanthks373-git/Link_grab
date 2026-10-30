@@ -16,6 +16,8 @@ data class QueueRequest(
     val thumbnail: String?,
     /** Save inside the app only (not visible to other apps). */
     val isPrivate: Boolean = false,
+    /** Overrides the file name (without extension); used for "_1" copies. */
+    val baseName: String? = null,
 )
 
 data class DownloadItem(
@@ -34,6 +36,9 @@ data class DownloadItem(
     val speedBps: Long = 0,
     /** Estimated seconds left, if known. */
     val etaSec: Long? = null,
+    /** File name (without extension) and extension this download will be saved as. */
+    val baseName: String = "",
+    val ext: String = "",
 ) {
     val isActive get() = status == Status.QUEUED || status == Status.RUNNING
 }

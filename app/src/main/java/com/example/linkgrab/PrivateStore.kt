@@ -42,6 +42,11 @@ object PrivateStore {
 
     fun file(entry: Entry): File = File(dir, entry.fileName)
 
+    /** True if a private file with this name (without extension) and extension already exists. */
+    fun exists(base: String, ext: String): Boolean = _entries.value.any {
+        it.title.equals(base, ignoreCase = true) && File(it.fileName).extension.equals(ext, ignoreCase = true)
+    }
+
     fun thumb(entry: Entry): File? = entry.thumbFileName?.let { File(dir, it) }?.takeIf { it.exists() }
 
     /** Copies [src] into private storage and records it. The caller deletes [src] afterwards. */

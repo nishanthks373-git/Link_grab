@@ -7,6 +7,8 @@ Android app (Kotlin + Jetpack Compose) that downloads video or audio from links.
 - **Import .txt**: pick a text file with links and they're all queued
 - **Share to app**: share a link from your browser straight into LinkGrab
 - **Preview before downloading**: every link shows its thumbnail, title and duration first. Tick the ones you want
+- **Download one video on its own**: every preview card has a round download button that downloads just that video at the quality shown. It then moves to the Downloads list like any other
+- **Duplicate warning**: if a file with the same name is already saved (or already downloading), the app asks whether to download it again as a copy with `_1` added to the name (`_2`, `_3`... if needed). With several files you can also skip the duplicates
 - **Quality dropdown per item** (e.g. 1080p / 720p / 480p / 360p / Audio only MP3) with the approximate size in MB, a "Set all to" shortcut, and a running total for everything selected
 - Size estimates come from the site's reported file sizes (or bitrate x duration), so they are approximate
 - Direct file links (.mp4, .mp3, ...) are fetched directly; page links (YouTube and many other sites) use the bundled yt-dlp engine, with ffmpeg for merging and audio extraction
