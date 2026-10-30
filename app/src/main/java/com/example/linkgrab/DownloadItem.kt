@@ -1,5 +1,7 @@
 package com.example.linkgrab
 
+import java.util.Locale
+
 enum class Mode { VIDEO, AUDIO }
 
 enum class Status { QUEUED, RUNNING, DONE, FAILED, CANCELLED }
@@ -28,6 +30,24 @@ data class DownloadItem(
     val thumbnail: String? = null,
     val message: String? = null,
     val isPrivate: Boolean = false,
+    /** Current speed in bytes per second (only meaningful while running). */
+    val speedBps: Long = 0,
+    /** Estimated seconds left, if known. */
+    val etaSec: Long? = null,
 ) {
     val isActive get() = status == Status.QUEUED || status == Status.RUNNING
+}
+
+fun formatSpeed(bytesPerSec: Long): String = when {
+    bytesPerSec >= 1_048_576 -> String.format(Locale.US, "%.1f MB/s", bytesPerSec / 1_048_576.0)
+    bytesPerSec >= 1024 -> "${bytesPerSec / 1024} KB/s"
+    bytesPerSec > 0 -> "$bytesPerSec B/s"
+    else -> "0 KB/s"
+}
+
+fun formatEta(sec: Long?): String? = when {
+    sec == null || sec <= 0 -> null
+    sec < 60 -> "${sec}s left"
+    sec < 3600 -> "${sec / 60}m ${sec % 60}s left"
+    else -> "${sec / 3600}h ${(sec % 3600) / 60}m left"
 }

@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicLong
  * UI and the foreground service see the same state.
  */
 object DownloadRepository {
-    private const val MAX_PARALLEL = 2
+    private const val MAX_PARALLEL = 5
 
     private val _items = MutableStateFlow<List<DownloadItem>>(emptyList())
     val items: StateFlow<List<DownloadItem>> = _items
@@ -128,7 +128,7 @@ object DownloadRepository {
     private suspend fun runItem(id: Long) {
         val item = current(id) ?: return
         if (item.status == Status.CANCELLED) return
-        patch(id) { it.copy(status = Status.RUNNING, progress = -1f, message = null) }
+        patch(id) { it.copy(status = Status.RUNNING, progress = -1f, message = null, speedBps = 0, etaSec = null) }
 
         val tmp = File(app.cacheDir, "dl/$id").apply { deleteRecursively(); mkdirs() }
         try {
@@ -182,15 +182,29 @@ object DownloadRepository {
                 out.outputStream().use { output ->
                     val buffer = ByteArray(64 * 1024)
                     var done = 0L
+                    var lastTime = System.nanoTime()
+                    var lastBytes = 0L
+                    var smooth = 0.0
                     while (true) {
                         currentCoroutineContext().ensureActive()
                         val n = input.read(buffer)
                         if (n < 0) break
                         output.write(buffer, 0, n)
                         done += n
-                        if (total > 0) {
-                            val p = done.toFloat() / total
-                            patchIfRunning(item.id) { it.copy(progress = p) }
+                        val now = System.nanoTime()
+                        if (now - lastTime >= 500_000_000L) {
+                            val instant = (done - lastBytes) * 1e9 / (now - lastTime)
+                            smooth = if (smooth == 0.0) instant else smooth * 0.6 + instant * 0.4
+                            val eta = if (total > 0 && smooth > 0) ((total - done) / smooth).toLong() else null
+                            patchIfRunning(item.id) {
+                                it.copy(
+                                    progress = if (total > 0) done.toFloat() / total else it.progress,
+                                    speedBps = smooth.toLong(),
+                                    etaSec = eta,
+                                )
+                            }
+                            lastTime = now
+                            lastBytes = done
                         }
                     }
                 }
@@ -220,6 +234,22 @@ object DownloadRepository {
         }
     }
 
+    private val speedRegex = Regex("""at\s+([\d.]+)\s*([KMGT]?)i?B/s""")
+
+    /** Reads the speed out of a yt-dlp line like "[download] 45.3% of 50MiB at 2.35MiB/s ETA 00:12". */
+    private fun parseSpeed(line: String): Long? {
+        val m = speedRegex.findAll(line).lastOrNull() ?: return null
+        val value = m.groupValues[1].toDoubleOrNull() ?: return null
+        val unit = when (m.groupValues[2]) {
+            "K" -> 1024.0
+            "M" -> 1_048_576.0
+            "G" -> 1_073_741_824.0
+            "T" -> 1_099_511_627_776.0
+            else -> 1.0
+        }
+        return (value * unit).toLong()
+    }
+
     private fun downloadWithYtDlp(item: DownloadItem, dir: File): File {
         prepareEngine()
         val request = YoutubeDLRequest(item.url).apply {
@@ -242,11 +272,14 @@ object DownloadRepository {
             }
         }
 
-        YoutubeDL.getInstance().execute(request, processId(item.id)) { progress, _, line ->
+        YoutubeDL.getInstance().execute(request, processId(item.id)) { progress, eta, line ->
+            val speed = parseSpeed(line)
             patchIfRunning(item.id) {
                 it.copy(
                     progress = if (progress >= 0f) progress / 100f else it.progress,
                     message = line.lineSequence().lastOrNull { l -> l.isNotBlank() }?.take(120),
+                    speedBps = speed ?: it.speedBps,
+                    etaSec = if (eta >= 0) eta else it.etaSec,
                 )
             }
         }

@@ -47,7 +47,8 @@ class DownloadService : Service() {
                         stopSelf()
                     } else {
                         val running = active.firstOrNull { it.status == Status.RUNNING }
-                        val text = "${active.size} download(s) in progress"
+                        val speed = active.filter { it.status == Status.RUNNING }.sumOf { it.speedBps }
+                        val text = "${active.size} download(s)" + if (speed > 0) " · ↓ ${formatSpeed(speed)}" else ""
                         val notification = buildNotification(text, running?.progress ?: -1f)
                         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification)
                     }

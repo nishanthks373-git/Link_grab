@@ -10,7 +10,7 @@ Android app (Kotlin + Jetpack Compose) that downloads video or audio from links.
 - **Quality dropdown per item** (e.g. 1080p / 720p / 480p / 360p / Audio only MP3) with the approximate size in MB, a "Set all to" shortcut, and a running total for everything selected
 - Size estimates come from the site's reported file sizes (or bitrate x duration), so they are approximate
 - Direct file links (.mp4, .mp3, ...) are fetched directly; page links (YouTube and many other sites) use the bundled yt-dlp engine, with ffmpeg for merging and audio extraction
-- 2 downloads in parallel, progress bars, cancel / retry, foreground notification so downloads continue in the background
+- Up to 5 downloads in parallel, with live speed and time left for each download and a total speed, plus cancel / retry and a notification so downloads continue in the background
 - Files are saved to `Downloads/LinkGrab` (no storage permission needed)
 
 ## Build
