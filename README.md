@@ -20,11 +20,10 @@ Android app (Kotlin + Jetpack Compose) that downloads video or audio from links.
 2. Let Gradle sync. If prompted, accept the suggested Gradle version.
 3. Run on a device or emulator (Android 10 / API 29 or newer). Use **Build > Build APK(s)** for a shareable APK.
 
-## Private downloads
-Tick **Download privately** in the bar at the bottom before you tap Download. Private files are saved inside the app's own storage instead of Downloads:
-- Other apps, file managers and the gallery can't see or open them. Use the **Private** tab to play or delete them.
-- The Private tab is locked with your fingerprint (or your phone's screen lock as a fallback). It locks again whenever you leave the app. If your phone has no fingerprint or screen lock set up, the tab stays locked.
-- They are deleted automatically when the app is uninstalled. App backup is turned off, so they can't be restored from a backup either.
+## Downloads and the Downloaded tab
+Tap the small round download button on a video to pick its resolution (and whether to keep it inside the app only) for that one download. The Download button in the bottom bar downloads everything ticked normally. Finished downloads leave the main list and appear in the **Downloaded** tab, which can play or delete them.
+
+Files kept inside the app are saved in the app's own storage, so other apps, file managers and the gallery can't see them, and uninstalling the app deletes them. They are reached by pulling down twice at the top of the Downloaded list, then confirming with your fingerprint or screen lock. They lock again whenever you leave the app.
 
 ## Player
 Private videos open full screen (wide videos turn the phone to landscape). Tap to show or hide the controls, double tap the right side to jump 10 seconds forward and the left side to jump 10 seconds back (keep double tapping to add more), drag the seek bar, and tap the speed button to change playback speed.

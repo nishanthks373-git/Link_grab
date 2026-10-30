@@ -12,6 +12,14 @@ import android.media.MediaPlayer
 import android.view.WindowManager
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material3.Slider
+import androidx.compose.material3.RadioButton
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.input.pointer.pointerInput
@@ -229,10 +237,11 @@ private fun MainScreen() {
 
     var input by remember { mutableStateOf("") }
     var tab by remember { mutableStateOf(0) }
-    var privateMode by remember { mutableStateOf(false) }
-    var playing by remember { mutableStateOf<PrivateStore.Entry?>(null) }
-    val privateEntries by PrivateStore.entries.collectAsState()
-    var lockMessage by remember { mutableStateOf<String?>(null) }
+    var playing by remember { mutableStateOf<PlayTarget?>(null) }
+    val downloaded by DownloadedStore.entries.collectAsState()
+    var hiddenOpen by remember { mutableStateOf(false) }
+    var unlockRequest by remember { mutableStateOf(0) }
+    var dialogId by remember { mutableStateOf<Long?>(null) }
     var pending by remember { mutableStateOf<PendingDownload?>(null) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
@@ -240,15 +249,15 @@ private fun MainScreen() {
     fun finishDownload(p: PendingDownload, choice: DuplicateChoice) {
         val n = PreviewRepository.commit(p, choice)
         toast(
-            if (n > 0) "Downloading $n item(s)" + (if (privateMode) " privately" else "")
+            if (n > 0) "Downloading $n item(s)"
             else "Nothing new to download"
         )
     }
 
     /** Starts downloading the given preview items, asking first if a file with the same name exists. */
-    fun startDownload(ids: List<Long>) {
+    fun startDownload(ids: List<Long>, hidden: Boolean = false) {
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-        val p = PreviewRepository.prepare(ids, privateMode)
+        val p = PreviewRepository.prepare(ids, hidden)
         when {
             p == null -> toast("Nothing to download")
             p.duplicateIndexes.isEmpty() -> finishDownload(p, DuplicateChoice.RENAME)
@@ -276,30 +285,82 @@ private fun MainScreen() {
         }
     }
 
+    fun closeHidden() {
+        hiddenOpen = false
+        PrivateLock.relock()
+    }
+
     fun tryUnlock() {
         val activity = context.findFragmentActivity() ?: return
         when (PrivateLock.availability(context)) {
             PrivateLock.Availability.OK ->
-                PrivateLock.authenticate(activity) { ok, error -> lockMessage = if (ok) null else error }
-            PrivateLock.Availability.NOT_SET_UP ->
-                lockMessage = "Set up a fingerprint or screen lock in your phone's settings to open private files."
-            PrivateLock.Availability.UNAVAILABLE ->
-                lockMessage = "Fingerprint and screen lock aren't available on this phone right now."
+                PrivateLock.authenticate(activity) { ok, _ -> if (ok) hiddenOpen = true }
+            PrivateLock.Availability.NOT_SET_UP -> toast("Set up a screen lock on your phone to continue")
+            PrivateLock.Availability.UNAVAILABLE -> Unit
         }
     }
 
-    // Ask for the fingerprint as soon as the Private tab opens.
-    LaunchedEffect(tab) {
-        if (tab == 1 && !PrivateLock.unlocked) tryUnlock()
-    }
-    // If the app locks again (for example after going to the background), close the player.
-    LaunchedEffect(PrivateLock.unlocked) {
-        if (!PrivateLock.unlocked) playing = null
+    // Two quick pulls down at the top of the Downloaded list ask for the fingerprint.
+    val pullConnection = remember {
+        object : NestedScrollConnection {
+            var accumulated = 0f
+            var pulls = 0
+            var lastPull = 0L
+
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && available.y > 0f) accumulated += available.y
+                return Offset.Zero
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (accumulated > 100f) {
+                    val now = System.currentTimeMillis()
+                    pulls = if (now - lastPull < 3000) pulls + 1 else 1
+                    lastPull = now
+                    if (pulls >= 2) {
+                        pulls = 0
+                        unlockRequest++
+                    }
+                }
+                accumulated = 0f
+                return Velocity.Zero
+            }
+        }
     }
 
-    playing?.let { entry ->
-        PlayerScreen(entry) { playing = null }
+    LaunchedEffect(unlockRequest) {
+        if (unlockRequest > 0 && tab == 1 && !hiddenOpen) tryUnlock()
+    }
+    LaunchedEffect(tab) {
+        if (tab != 1 && hiddenOpen) closeHidden()
+        if (tab == 1) withContext(Dispatchers.IO) { DownloadedStore.verify() }
+    }
+    // If the app locks again (for example after going to the background), close everything hidden.
+    LaunchedEffect(PrivateLock.unlocked) {
+        if (!PrivateLock.unlocked) {
+            hiddenOpen = false
+            if (playing?.hidden == true) playing = null
+        }
+    }
+    BackHandler(enabled = hiddenOpen && playing == null) { closeHidden() }
+
+    playing?.let { target ->
+        PlayerScreen(target) { playing = null }
         return
+    }
+
+    dialogId?.let { id ->
+        val item = previews.firstOrNull { it.id == id }
+        if (item == null || item.state != PreviewState.READY) dialogId = null
+        else DownloadDialog(
+            item = item,
+            onDismiss = { dialogId = null },
+            onConfirm = { index, hidden ->
+                PreviewRepository.selectOption(id, index)
+                dialogId = null
+                startDownload(listOf(id), hidden)
+            },
+        )
     }
 
     val selected = previews.filter { it.checked && it.state == PreviewState.READY && it.chosen != null }
@@ -351,7 +412,7 @@ private fun MainScreen() {
             Header(
                 tab = tab,
                 onTab = { tab = it },
-                privateLabel = if (PrivateLock.unlocked) "Private (${privateEntries.size})" else "Private",
+                downloadedLabel = if (downloaded.isEmpty()) "Downloaded" else "Downloaded (${downloaded.size})",
                 totalSpeed = totalSpeed,
                 activeCount = activeCount,
             )
@@ -366,7 +427,6 @@ private fun MainScreen() {
                     count = selected.size,
                     knownBytes = knownBytes,
                     unknownCount = unknownCount,
-                    privateMode = privateMode,
                     onDownload = { startDownload(selected.map { it.id }) },
                 )
             }
@@ -376,10 +436,16 @@ private fun MainScreen() {
             val sideModifier = Modifier
                 .padding(padding)
                 .padding(horizontal = 16.dp)
-            if (PrivateLock.unlocked) {
-                PrivateLibrary(modifier = sideModifier, onPlay = { playing = it })
+            if (hiddenOpen && PrivateLock.unlocked) {
+                PrivateLibrary(
+                    modifier = sideModifier,
+                    onPlay = { playing = PlayTarget(it.id, it.title, it.audio, Uri.fromFile(PrivateStore.file(it)), true) },
+                )
             } else {
-                LockedPanel(modifier = sideModifier, message = lockMessage, onUnlock = { tryUnlock() })
+                DownloadedLibrary(
+                    modifier = sideModifier.nestedScroll(pullConnection),
+                    onPlay = { playing = PlayTarget(it.id, it.title, it.audio, Uri.parse(it.uri), false) },
+                )
             }
         } else LazyColumn(
             modifier = Modifier
@@ -433,17 +499,10 @@ private fun MainScreen() {
             // ---------------------------------------------------------- preview section
             if (previews.isNotEmpty()) {
                 item(key = "preview-header") {
-                    PreviewHeader(
-                        count = previews.size,
-                        privateMode = privateMode,
-                        onPrivateChange = {
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            privateMode = it
-                        },
-                    )
+                    PreviewHeader(count = previews.size)
                 }
                 items(previews, key = { "p${it.id}" }) {
-                    PreviewCard(it, Modifier.animateItem(), onDownload = { startDownload(listOf(it.id)) })
+                    PreviewCard(it, Modifier.animateItem(), onDownload = { dialogId = it.id })
                 }
             }
 
@@ -495,7 +554,7 @@ private fun MainScreen() {
 // ================================================================== header / bar
 
 @Composable
-private fun Header(tab: Int, onTab: (Int) -> Unit, privateLabel: String, totalSpeed: Long, activeCount: Int) {
+private fun Header(tab: Int, onTab: (Int) -> Unit, downloadedLabel: String, totalSpeed: Long, activeCount: Int) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -518,7 +577,7 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, privateLabel: String, totalSp
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             PillTab("Download", tab == 0) { onTab(0) }
-            PillTab(privateLabel, tab == 1) { onTab(1) }
+            PillTab(downloadedLabel, tab == 1) { onTab(1) }
         }
     }
 }
@@ -567,15 +626,11 @@ private fun DownloadBar(
     count: Int,
     knownBytes: Long,
     unknownCount: Int,
-    privateMode: Boolean,
     onDownload: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
-    val container by animateColorAsState(
-        if (privateMode) cs.tertiaryContainer else cs.primaryContainer,
-        label = "barColor",
-    )
-    val content = if (privateMode) cs.onTertiaryContainer else cs.onPrimaryContainer
+    val container = cs.primaryContainer
+    val content = cs.onPrimaryContainer
 
     Surface(
         color = container,
@@ -588,15 +643,6 @@ private fun DownloadBar(
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
-            if (privateMode) {
-                Text(
-                    "Private mode: files are saved inside this app only",
-                    color = content,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                )
-                Spacer(Modifier.height(8.dp))
-            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text("$count selected", color = content, fontWeight = FontWeight.Bold)
@@ -611,9 +657,9 @@ private fun DownloadBar(
                 }
                 Button(
                     onClick = onDownload,
-                    colors = ButtonDefaults.buttonColors(containerColor = if (privateMode) cs.tertiary else cs.primary),
+                    colors = ButtonDefaults.buttonColors(containerColor = cs.primary),
                     contentPadding = PaddingValues(horizontal = 24.dp, vertical = 12.dp),
-                ) { Text(if (privateMode) "Download privately" else "Download", fontWeight = FontWeight.Bold) }
+                ) { Text("Download", fontWeight = FontWeight.Bold) }
             }
         }
     }
@@ -672,7 +718,7 @@ private fun EmptyState() {
 // ================================================================ preview section
 
 @Composable
-private fun PreviewHeader(count: Int, privateMode: Boolean, onPrivateChange: (Boolean) -> Unit) {
+private fun PreviewHeader(count: Int) {
     var menuOpen by remember { mutableStateOf(false) }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -709,7 +755,6 @@ private fun PreviewHeader(count: Int, privateMode: Boolean, onPrivateChange: (Bo
             Box(modifier = Modifier.weight(1f))
             TextButton(onClick = { PreviewRepository.clear() }) { Text("Clear") }
         }
-        PrivateToggle(privateMode, onPrivateChange)
     }
 }
 
@@ -920,7 +965,6 @@ private fun QueueCard(item: DownloadItem, modifier: Modifier = Modifier) {
                             cs.surfaceVariant,
                             cs.onSurfaceVariant,
                         )
-                        if (item.isPrivate) StatusChip("private", cs.tertiaryContainer, cs.onTertiaryContainer)
                     }
 
                     if (item.status == Status.RUNNING) {
@@ -1009,13 +1053,7 @@ private fun PrivateLibrary(modifier: Modifier = Modifier, onPlay: (PrivateStore.
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             LogoMark(size = 80.dp, circle = cs.tertiary)
-            Text("No private files yet", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text(
-                "Tick \"Download privately\" before you download, and the files will show up here. They can only be opened inside this app and are deleted if you uninstall it.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = cs.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-            )
+            Text("Nothing here yet", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         }
     } else {
         LazyColumn(
@@ -1098,11 +1136,10 @@ private fun PrivateLibrary(modifier: Modifier = Modifier, onPlay: (PrivateStore.
 }
 
 @Composable
-private fun PlayerScreen(entry: PrivateStore.Entry, onClose: () -> Unit) {
+private fun PlayerScreen(entry: PlayTarget, onClose: () -> Unit) {
     BackHandler(onBack = onClose)
     val context = LocalContext.current
     val activity = remember { context.findFragmentActivity() }
-    val file = remember(entry.id) { PrivateStore.file(entry) }
 
     var videoView by remember { mutableStateOf<VideoView?>(null) }
     var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
@@ -1210,7 +1247,7 @@ private fun PlayerScreen(entry: PrivateStore.Entry, onClose: () -> Unit) {
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
                 VideoView(ctx).apply {
-                    setVideoPath(file.absolutePath)
+                    setVideoURI(entry.uri)
                     setOnPreparedListener { mp ->
                         mediaPlayer = mp
                         durationMs = duration
@@ -1366,40 +1403,6 @@ private fun clock(ms: Int): String {
     else String.format(Locale.US, "%d:%02d", m, sec)
 }
 
-// ======================================================================= lock
-
-@Composable
-private fun LockedPanel(modifier: Modifier = Modifier, message: String?, onUnlock: () -> Unit) {
-    val cs = MaterialTheme.colorScheme
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(top = 48.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(88.dp)
-                .clip(CircleShape)
-                .background(cs.tertiaryContainer),
-            contentAlignment = Alignment.Center,
-        ) { Text("🔒", fontSize = 38.sp) }
-        Text("Private files are locked", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Text(
-            text = message ?: "Use your fingerprint or screen lock to open them.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = cs.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
-        Button(
-            onClick = onUnlock,
-            colors = ButtonDefaults.buttonColors(containerColor = cs.tertiary, contentColor = cs.onTertiary),
-            contentPadding = PaddingValues(horizontal = 32.dp, vertical = 12.dp),
-        ) { Text("Unlock", fontWeight = FontWeight.Bold) }
-    }
-}
-
 private fun Context.findFragmentActivity(): FragmentActivity? {
     var c: Context = this
     while (c is ContextWrapper) {
@@ -1439,31 +1442,167 @@ private fun DownloadIconButton(onClick: () -> Unit) {
     }
 }
 
+// ============================================================ downloaded + dialog
+
+class PlayTarget(val id: String, val title: String, val audio: Boolean, val uri: Uri, val hidden: Boolean)
+
 @Composable
-private fun PrivateToggle(checked: Boolean, onChange: (Boolean) -> Unit) {
+private fun DownloadedLibrary(modifier: Modifier = Modifier, onPlay: (DownloadedStore.Entry) -> Unit) {
     val cs = MaterialTheme.colorScheme
-    val bg by animateColorAsState(
-        if (checked) cs.tertiaryContainer else cs.surfaceVariant,
-        label = "privateToggle",
-    )
-    val fg = if (checked) cs.onTertiaryContainer else cs.onSurfaceVariant
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(bg)
-            .clickable { onChange(!checked) }
-            .padding(end = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    val entries by DownloadedStore.entries.collectAsState()
+    var toDelete by remember { mutableStateOf<DownloadedStore.Entry?>(null) }
+
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(vertical = 14.dp),
     ) {
-        Checkbox(checked = checked, onCheckedChange = onChange)
-        Column {
-            Text("Download privately", color = fg, fontWeight = FontWeight.Medium)
-            Text(
-                "Saved inside this app only, hidden from the gallery and other apps",
-                color = fg.copy(alpha = 0.8f),
-                fontSize = 12.sp,
-            )
+        if (entries.isEmpty()) {
+            item(key = "empty") {
+                Column(
+                    modifier = Modifier
+                        .fillParentMaxSize()
+                        .padding(top = 32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    LogoMark(size = 80.dp, circle = cs.primary)
+                    Text("Nothing downloaded yet", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Finished downloads show up here.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = cs.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+        }
+        items(entries.asReversed(), key = { it.id }) { entry ->
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .animateItem(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = cs.surface),
+                border = BorderStroke(1.dp, cs.outline.copy(alpha = 0.25f)),
+            ) {
+                Row(modifier = Modifier.height(IntrinsicSize.Min)) {
+                    Box(
+                        modifier = Modifier
+                            .width(6.dp)
+                            .fillMaxHeight()
+                            .background(cs.primary),
+                    )
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Thumb(DownloadedStore.thumb(entry), null, width = 96.dp)
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = entry.title,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                StatusChip(
+                                    if (entry.audio) "audio" else "video",
+                                    cs.primaryContainer,
+                                    cs.onPrimaryContainer,
+                                )
+                                StatusChip(
+                                    formatSize(entry.sizeBytes).removePrefix("~"),
+                                    cs.surfaceVariant,
+                                    cs.onSurfaceVariant,
+                                )
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FilledTonalButton(
+                                    onClick = { onPlay(entry) },
+                                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                                ) { Text("Play") }
+                                TextButton(onClick = { toDelete = entry }) {
+                                    Text("Delete", color = cs.error)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
+
+    toDelete?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { toDelete = null },
+            title = { Text("Delete this file?") },
+            text = { Text("\"${entry.title}\" will be permanently deleted from this phone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    DownloadedStore.delete(entry.id)
+                    toDelete = null
+                }) { Text("Delete", color = cs.error) }
+            },
+            dismissButton = { TextButton(onClick = { toDelete = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** Asks for the quality and whether to download privately, for this one download only. */
+@Composable
+private fun DownloadDialog(item: PreviewItem, onDismiss: () -> Unit, onConfirm: (Int, Boolean) -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    var index by remember { mutableStateOf(item.selected.coerceIn(0, (item.options.size - 1).coerceAtLeast(0))) }
+    var hidden by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Download", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    item.title ?: item.url,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = cs.onSurfaceVariant,
+                )
+                Text("Resolution", fontWeight = FontWeight.Medium)
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 240.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    item.options.forEachIndexed { i, option ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { index = i },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = index == i, onClick = { index = i })
+                            Text(option.display, fontSize = 14.sp)
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { hidden = !hidden },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = hidden, onCheckedChange = { hidden = it })
+                    Text("Download privately", fontWeight = FontWeight.Medium)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(index, hidden) }) { Text("Download", fontWeight = FontWeight.Bold) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }

@@ -7,5 +7,6 @@ class App : Application() {
         super.onCreate()
         DownloadRepository.init(this)
         PrivateStore.init(this)
+        DownloadedStore.init(this)
     }
 }

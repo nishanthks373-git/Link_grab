@@ -55,7 +55,7 @@ object PrivateLock {
         }
 
         val info = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("Unlock private files")
+            .setTitle("Confirm it's you")
             .setSubtitle("Use your fingerprint or screen lock")
             .setAllowedAuthenticators(ALLOWED)
             .build()

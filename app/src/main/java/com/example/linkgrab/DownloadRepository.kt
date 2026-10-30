@@ -217,20 +217,19 @@ object DownloadRepository {
             }
             if (item.isPrivate) {
                 savePrivately(item, file)
-                // Private downloads never stay in the Downloads list; they live in the Private tab.
+                // Finished downloads leave this list; they are shown in the other tab instead.
                 _items.update { list -> list.filterNot { it.id == id } }
                 Handler(Looper.getMainLooper()).post {
-                    Toast.makeText(app, "Private download finished", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(app, "Download finished", Toast.LENGTH_SHORT).show()
                 }
             } else {
-                val savedName = saveToDownloads(file, "${item.baseName.ifBlank { file.nameWithoutExtension }}.${file.extension.ifBlank { item.ext }}")
-                patch(id) {
-                    it.copy(
-                        status = Status.DONE,
-                        progress = 1f,
-                        title = savedName,
-                        message = "Saved to Downloads/LinkGrab",
-                    )
+                val title = item.baseName.ifBlank { file.nameWithoutExtension }
+                val size = file.length()
+                val (_, uri) = saveToDownloads(file, "$title.${file.extension.ifBlank { item.ext }}")
+                DownloadedStore.add(uri, title, item.mode == Mode.AUDIO, fetchThumb(item), size)
+                _items.update { list -> list.filterNot { it.id == id } }
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(app, "Download finished", Toast.LENGTH_SHORT).show()
                 }
             }
         } catch (e: CancellationException) {
@@ -382,13 +381,7 @@ object DownloadRepository {
 
     /** Moves the file into the app's private storage; it never touches Downloads or MediaStore. */
     private fun savePrivately(item: DownloadItem, file: File): String {
-        val thumbBytes = item.thumbnail?.let { url ->
-            runCatching {
-                http.newCall(Request.Builder().url(url).build()).execute().use { r ->
-                    if (r.isSuccessful) r.body?.bytes() else null
-                }
-            }.getOrNull()
-        }
+        val thumbBytes = fetchThumb(item)
         val title = item.baseName.ifBlank { file.nameWithoutExtension }
         PrivateStore.save(file, title, item.mode == Mode.AUDIO, thumbBytes)
         return title
@@ -397,7 +390,15 @@ object DownloadRepository {
     // --------------------------------------------------------- save to Downloads
 
     /** Copies the finished file into Downloads/LinkGrab via MediaStore (no storage permission needed). */
-    private fun saveToDownloads(file: File, displayName: String = file.name): String {
+    private fun fetchThumb(item: DownloadItem): ByteArray? = item.thumbnail?.let { url ->
+        runCatching {
+            http.newCall(Request.Builder().url(url).build()).execute().use { r ->
+                if (r.isSuccessful) r.body?.bytes() else null
+            }
+        }.getOrNull()
+    }
+
+    private fun saveToDownloads(file: File, displayName: String = file.name): Pair<String, android.net.Uri> {
         val ext = file.extension.lowercase()
         val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
         val resolver = app.contentResolver
@@ -424,6 +425,6 @@ object DownloadRepository {
             resolver.delete(uri, null, null)
             throw e
         }
-        return displayName
+        return displayName to uri
     }
 }
