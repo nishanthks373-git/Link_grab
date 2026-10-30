@@ -13,6 +13,11 @@ import android.view.WindowManager
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material3.Slider
 import androidx.compose.material3.RadioButton
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -302,30 +307,15 @@ private fun MainScreen() {
     }
 
     // Two quick pulls down at the top of the Downloaded list ask for the fingerprint.
-    val pullConnection = remember {
-        object : NestedScrollConnection {
-            var accumulated = 0f
-            var pulls = 0
-            var lastPull = 0L
-
-            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                if (source == NestedScrollSource.UserInput && available.y > 0f) accumulated += available.y
-                return Offset.Zero
-            }
-
-            override suspend fun onPreFling(available: Velocity): Velocity {
-                if (accumulated > 100f) {
-                    val now = System.currentTimeMillis()
-                    pulls = if (now - lastPull < 3000) pulls + 1 else 1
-                    lastPull = now
-                    if (pulls >= 2) {
-                        pulls = 0
-                        unlockRequest++
-                    }
-                }
-                accumulated = 0f
-                return Velocity.Zero
-            }
+    var pulls by remember { mutableStateOf(0) }
+    var lastPull by remember { mutableStateOf(0L) }
+    val onPull: () -> Unit = {
+        val now = System.currentTimeMillis()
+        pulls = if (now - lastPull < 3000) pulls + 1 else 1
+        lastPull = now
+        if (pulls >= 2) {
+            pulls = 0
+            unlockRequest++
         }
     }
 
@@ -472,7 +462,8 @@ private fun MainScreen() {
                 )
             } else {
                 DownloadedLibrary(
-                    modifier = sideModifier.nestedScroll(pullConnection),
+                    modifier = sideModifier,
+                    onPull = onPull,
                     onPlay = { playing = PlayTarget(it.id, it.title, it.audio, Uri.parse(it.uri), false) },
                     onMove = { entry ->
                         scope.launch {
@@ -1486,14 +1477,33 @@ private fun DownloadedLibrary(
     modifier: Modifier = Modifier,
     onPlay: (DownloadedStore.Entry) -> Unit,
     onMove: (DownloadedStore.Entry) -> Unit,
+    onPull: () -> Unit,
 ) {
+    val listState = rememberLazyListState()
     val cs = MaterialTheme.colorScheme
     val entries by DownloadedStore.entries.collectAsState()
     var toDelete by remember { mutableStateOf<DownloadedStore.Entry?>(null) }
     var toMove by remember { mutableStateOf<DownloadedStore.Entry?>(null) }
 
     LazyColumn(
-        modifier = modifier.fillMaxSize(),
+        state = listState,
+        modifier = modifier
+            .fillMaxSize()
+            // Watches (without consuming) for a downward drag that starts with the list at the top.
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    val atTop = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
+                    var total = 0f
+                    var change = down
+                    while (change.pressed) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        total += change.positionChange().y
+                    }
+                    if (atTop && total > 150f) onPull()
+                }
+            },
         verticalArrangement = Arrangement.spacedBy(10.dp),
         contentPadding = PaddingValues(vertical = 14.dp),
     ) {

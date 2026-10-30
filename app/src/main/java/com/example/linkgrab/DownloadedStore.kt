@@ -38,6 +38,7 @@ object DownloadedStore {
         dir = File(app.filesDir, "downloaded").apply { mkdirs() }
         _entries.value = load()
         verify()
+        Thread { runCatching { importExisting() } }.start()
     }
 
     fun thumb(entry: Entry): File? = entry.thumbFileName?.let { File(dir, it) }?.takeIf { it.exists() }
@@ -88,6 +89,45 @@ object DownloadedStore {
             false
         } finally {
             tmp.delete()
+        }
+    }
+
+    /** Lists files saved by earlier versions of the app (before this list existed). */
+    private fun importExisting() {
+        val known = _entries.value.map { it.uri }.toSet()
+        val found = ArrayList<Entry>()
+        val collection = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        val cols = arrayOf(
+            android.provider.MediaStore.Downloads._ID,
+            android.provider.MediaStore.Downloads.DISPLAY_NAME,
+            android.provider.MediaStore.Downloads.MIME_TYPE,
+            android.provider.MediaStore.Downloads.SIZE,
+            android.provider.MediaStore.Downloads.DATE_ADDED,
+        )
+        app.contentResolver.query(
+            collection, cols,
+            "${android.provider.MediaStore.Downloads.RELATIVE_PATH} LIKE ?", arrayOf("Download/LinkGrab%"),
+            "${android.provider.MediaStore.Downloads.DATE_ADDED} ASC",
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val uri = android.content.ContentUris.withAppendedId(collection, c.getLong(0)).toString()
+                if (uri in known) continue
+                val name = c.getString(1) ?: continue
+                found += Entry(
+                    id = UUID.randomUUID().toString(),
+                    uri = uri,
+                    title = name.substringBeforeLast('.'),
+                    audio = c.getString(2)?.startsWith("audio") == true,
+                    thumbFileName = null,
+                    sizeBytes = c.getLong(3),
+                    savedAt = c.getLong(4) * 1000,
+                )
+            }
+        }
+        if (found.isEmpty()) return
+        synchronized(lock) {
+            _entries.update { it + found }
+            persist(_entries.value)
         }
     }
 

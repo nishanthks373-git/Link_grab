@@ -19,7 +19,10 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -43,14 +46,85 @@ object DownloadRepository {
     private val gate = Semaphore(MAX_PARALLEL)
     private val jobs = ConcurrentHashMap<Long, Job>()
     private val nextId = AtomicLong(1)
-    private val http = OkHttpClient()
+    private val http = OkHttpClient.Builder()
+        .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
 
     private lateinit var app: Context
     private val engineLock = Any()
     private var engineReady = false
 
+    private val queueFile get() = File(app.filesDir, "queue.json")
+
     fun init(context: Context) {
         app = context.applicationContext
+        restoreQueue()
+        // Save the queue whenever something other than live progress changes.
+        scope.launch {
+            _items.map { queueJson(it) }.distinctUntilChanged().collect { json ->
+                runCatching {
+                    val tmp = File(app.filesDir, "queue.json.tmp")
+                    tmp.writeText(json)
+                    tmp.renameTo(queueFile)
+                }
+            }
+        }
+    }
+
+    private fun queueJson(list: List<DownloadItem>): String {
+        val arr = org.json.JSONArray()
+        list.filter { it.status != Status.DONE }.forEach {
+            arr.put(
+                org.json.JSONObject()
+                    .put("id", it.id).put("url", it.url).put("mode", it.mode.name)
+                    .put("height", it.height ?: org.json.JSONObject.NULL)
+                    .put("status", it.status.name)
+                    .put("title", it.title ?: org.json.JSONObject.NULL)
+                    .put("thumbnail", it.thumbnail ?: org.json.JSONObject.NULL)
+                    .put("message", it.message ?: org.json.JSONObject.NULL)
+                    .put("isPrivate", it.isPrivate).put("baseName", it.baseName).put("ext", it.ext)
+            )
+        }
+        return arr.toString()
+    }
+
+    /** Brings back the queue after the app was closed or updated; unfinished downloads start again. */
+    private fun restoreQueue() {
+        val restored = runCatching {
+            val arr = org.json.JSONArray(queueFile.readText())
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                val saved = Status.valueOf(o.getString("status"))
+                DownloadItem(
+                    id = o.getLong("id"),
+                    url = o.getString("url"),
+                    mode = Mode.valueOf(o.getString("mode")),
+                    height = if (o.isNull("height")) null else o.getInt("height"),
+                    status = if (saved == Status.RUNNING) Status.QUEUED else saved,
+                    title = if (o.isNull("title")) null else o.getString("title"),
+                    thumbnail = if (o.isNull("thumbnail")) null else o.getString("thumbnail"),
+                    message = if (o.isNull("message")) null else o.getString("message"),
+                    isPrivate = o.optBoolean("isPrivate"),
+                    baseName = o.optString("baseName"),
+                    ext = o.optString("ext"),
+                )
+            }
+        }.getOrDefault(emptyList())
+
+        // Forget half-finished files that don't belong to a restored download.
+        val keep = restored.filter { it.status != Status.DONE }.map { it.id.toString() }.toSet()
+        File(app.cacheDir, "dl").listFiles()?.filter { it.name !in keep }?.forEach { it.deleteRecursively() }
+
+        if (restored.isEmpty()) return
+        nextId.set(restored.maxOf { it.id } + 1)
+        _items.value = restored
+        val toStart = restored.filter { it.status == Status.QUEUED }
+        if (toStart.isNotEmpty()) {
+            runCatching { DownloadService.start(app) }
+            toStart.forEach { launchJob(it.id) }
+        }
     }
 
     // ---------------------------------------------------------------- queue API
@@ -203,17 +277,41 @@ object DownloadRepository {
         jobs[id] = scope.launch { gate.withPermit { runItem(id) } }
     }
 
+    /** Runs [block], trying again a few times when the connection drops (for example "reset by peer"). */
+    private suspend fun <T> withRetry(id: Long, block: suspend () -> T): T {
+        var attempt = 0
+        while (true) {
+            try {
+                return block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (current(id)?.status == Status.CANCELLED) throw e
+                val msg = e.message.orEmpty()
+                val permanent = Regex(
+                    "unavailable|private video|sign in|unsupported url|HTTP Error 40\\d|HTTP 40\\d|copyright|members-only",
+                    RegexOption.IGNORE_CASE,
+                ).containsMatchIn(msg)
+                attempt++
+                if (permanent || attempt > 4) throw e
+                patchIfRunning(id) { it.copy(message = "Connection dropped, retrying ($attempt of 4)…", speedBps = 0) }
+                delay(3000L * attempt)
+            }
+        }
+    }
+
     private suspend fun runItem(id: Long) {
         val item = current(id) ?: return
         if (item.status == Status.CANCELLED) return
         patch(id) { it.copy(status = Status.RUNNING, progress = -1f, message = null, speedBps = 0, etaSec = null) }
 
-        val tmp = File(app.cacheDir, "dl/$id").apply { deleteRecursively(); mkdirs() }
+        // Partly downloaded files stay in this folder so a retry carries on instead of starting over.
+        val tmp = File(app.cacheDir, "dl/$id").apply { mkdirs() }
+        var keepPartial = false
         try {
-            val file = if (LinkParser.useDirect(item.url, item.mode)) {
-                downloadDirect(item, tmp)
-            } else {
-                downloadWithYtDlp(item, tmp)
+            val file = withRetry(id) {
+                if (LinkParser.useDirect(item.url, item.mode)) downloadDirect(item, tmp)
+                else downloadWithYtDlp(item, tmp)
             }
             if (item.isPrivate) {
                 savePrivately(item, file)
@@ -237,6 +335,7 @@ object DownloadRepository {
         } catch (e: Throwable) {
             // A user cancel kills the process and lands here too; keep the Cancelled state.
             if (current(id)?.status != Status.CANCELLED) {
+                keepPartial = true
                 patch(id) {
                     it.copy(
                         status = Status.FAILED,
@@ -245,7 +344,7 @@ object DownloadRepository {
                 }
             }
         } finally {
-            tmp.deleteRecursively()
+            if (!keepPartial) tmp.deleteRecursively()
             jobs.remove(id)
         }
     }
@@ -253,22 +352,27 @@ object DownloadRepository {
     // --------------------------------------------------------- direct file links
 
     private suspend fun downloadDirect(item: DownloadItem, dir: File): File {
-        val request = Request.Builder().url(item.url).build()
+        val name = "${item.baseName.ifBlank { "download" }}.${item.ext.ifBlank { "bin" }}"
+        val out = File(dir, name)
+        val existing = if (out.exists()) out.length() else 0L
+        val request = Request.Builder().url(item.url)
+            .apply { if (existing > 0) header("Range", "bytes=$existing-") }
+            .build()
         http.newCall(request).execute().use { response ->
+            if (response.code == 416 && existing > 0) return out // already complete
             if (!response.isSuccessful) error("HTTP ${response.code}")
             val body = response.body ?: error("Empty response")
-            val total = body.contentLength()
-
-            val name = "${item.baseName.ifBlank { "download" }}.${item.ext.ifBlank { "bin" }}"
-            val out = File(dir, name)
+            val resumed = response.code == 206 && existing > 0
+            val start = if (resumed) existing else 0L
+            val total = if (body.contentLength() > 0) body.contentLength() + start else -1L
             patchIfRunning(item.id) { it.copy(title = name) }
 
             body.byteStream().use { input ->
-                out.outputStream().use { output ->
+                java.io.FileOutputStream(out, resumed).use { output ->
                     val buffer = ByteArray(64 * 1024)
-                    var done = 0L
+                    var done = start
                     var lastTime = System.nanoTime()
-                    var lastBytes = 0L
+                    var lastBytes = start
                     var smooth = 0.0
                     while (true) {
                         currentCoroutineContext().ensureActive()
@@ -340,6 +444,14 @@ object DownloadRepository {
         val request = YoutubeDLRequest(item.url).apply {
             addOption("--no-playlist")
             addOption("--no-mtime")
+            addOption("--continue")
+            addOption("--retries", "15")
+            addOption("--fragment-retries", "15")
+            addOption("--extractor-retries", "5")
+            addOption("--retry-sleep", "3")
+            addOption("--socket-timeout", "30")
+            addOption("--http-chunk-size", "10M")
+            addOption("--force-ipv4")
             addOption("-o", "${dir.absolutePath}/${item.baseName.ifBlank { "download" }.replace("%", "%%")}.%(ext)s")
             if (item.mode == Mode.AUDIO) {
                 addOption("-x")
