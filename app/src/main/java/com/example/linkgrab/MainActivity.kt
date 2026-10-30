@@ -308,14 +308,14 @@ private fun MainScreen() {
         }
     }
 
-    // Two quick pulls down at the top of the Downloaded list ask for the fingerprint.
+    // Three quick pulls down at the top of the Downloaded list ask for the fingerprint.
     var pulls by remember { mutableStateOf(0) }
     var lastPull by remember { mutableStateOf(0L) }
     val onPull: () -> Unit = {
         val now = System.currentTimeMillis()
-        pulls = if (now - lastPull < 3000) pulls + 1 else 1
+        pulls = if (now - lastPull < 4000) pulls + 1 else 1
         lastPull = now
-        if (pulls >= 2) {
+        if (pulls >= 3) {
             pulls = 0
             unlockRequest++
         }
