@@ -23,10 +23,12 @@ object DownloadedStore {
         val thumbFileName: String?,
         val sizeBytes: Long,
         val savedAt: Long,
+        val folderId: String? = null,
     )
 
     private lateinit var app: Context
     private lateinit var dir: File
+    lateinit var folderStore: FolderStore
     private val lock = Any()
     private val _entries = MutableStateFlow<List<Entry>>(emptyList())
     val entries: StateFlow<List<Entry>> = _entries
@@ -36,6 +38,7 @@ object DownloadedStore {
     fun init(context: Context) {
         app = context.applicationContext
         dir = File(app.filesDir, "downloaded").apply { mkdirs() }
+        folderStore = FolderStore(File(dir, "folders.json"))
         _entries.value = load()
         verify()
         Thread { runCatching { importExisting() } }.start()
@@ -131,6 +134,40 @@ object DownloadedStore {
         }
     }
 
+    /** Renames the file in Downloads as well as in the list. */
+    fun rename(id: String, newTitle: String) {
+        val title = DownloadRepository.safeName(newTitle)
+        synchronized(lock) {
+            val entry = _entries.value.firstOrNull { it.id == id } ?: return
+            runCatching {
+                val uri = Uri.parse(entry.uri)
+                val old = app.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { if (it.moveToFirst()) it.getString(0) else null }
+                val ext = old?.substringAfterLast('.', "").orEmpty()
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, if (ext.isBlank()) title else "$title.$ext")
+                }
+                app.contentResolver.update(uri, values, null, null)
+            }
+            _entries.update { list -> list.map { if (it.id == id) it.copy(title = title) else it } }
+            persist(_entries.value)
+        }
+    }
+
+    fun moveTo(ids: Set<String>, folderId: String?) {
+        synchronized(lock) {
+            _entries.update { list -> list.map { if (it.id in ids) it.copy(folderId = folderId) else it } }
+            persist(_entries.value)
+        }
+    }
+
+    /** Deletes a folder, everything inside it and all its sub-folders. */
+    fun deleteFolder(id: String) {
+        val folders = folderStore.descendants(id) + id
+        _entries.value.filter { it.folderId in folders }.forEach { delete(it.id) }
+        folderStore.remove(folders)
+    }
+
     /** Drops entries whose file no longer exists (deleted with a file manager, for example). */
     fun verify() {
         synchronized(lock) {
@@ -159,6 +196,7 @@ object DownloadedStore {
                     .put("thumbFileName", it.thumbFileName ?: JSONObject.NULL)
                     .put("sizeBytes", it.sizeBytes)
                     .put("savedAt", it.savedAt)
+                    .put("folderId", it.folderId ?: JSONObject.NULL)
             )
         }
         val tmp = File(dir, "index.json.tmp")
@@ -180,6 +218,7 @@ object DownloadedStore {
                     thumbFileName = if (o.isNull("thumbFileName")) null else o.getString("thumbFileName"),
                     sizeBytes = o.optLong("sizeBytes"),
                     savedAt = o.optLong("savedAt"),
+                    folderId = if (o.isNull("folderId")) null else o.getString("folderId"),
                 )
             }
         }.getOrDefault(emptyList())

@@ -23,9 +23,11 @@ object PrivateStore {
         val thumbFileName: String?,
         val sizeBytes: Long,
         val savedAt: Long,
+        val folderId: String? = null,
     )
 
     private lateinit var dir: File
+    lateinit var folderStore: FolderStore
     private val lock = Any()
     private val _entries = MutableStateFlow<List<Entry>>(emptyList())
     val entries: StateFlow<List<Entry>> = _entries
@@ -34,6 +36,7 @@ object PrivateStore {
 
     fun init(context: Context) {
         dir = File(context.filesDir, "private").apply { mkdirs() }
+        folderStore = FolderStore(File(dir, "folders.json"))
         val loaded = load()
         val existing = loaded.filter { File(dir, it.fileName).exists() }
         _entries.value = existing
@@ -79,6 +82,28 @@ object PrivateStore {
         }
     }
 
+    fun rename(id: String, newTitle: String) {
+        val title = DownloadRepository.safeName(newTitle)
+        synchronized(lock) {
+            _entries.update { list -> list.map { if (it.id == id) it.copy(title = title) else it } }
+            persist(_entries.value)
+        }
+    }
+
+    fun moveTo(ids: Set<String>, folderId: String?) {
+        synchronized(lock) {
+            _entries.update { list -> list.map { if (it.id in ids) it.copy(folderId = folderId) else it } }
+            persist(_entries.value)
+        }
+    }
+
+    /** Deletes a folder, everything inside it and all its sub-folders. */
+    fun deleteFolder(id: String) {
+        val folders = folderStore.descendants(id) + id
+        _entries.value.filter { it.folderId in folders }.forEach { delete(it.id) }
+        folderStore.remove(folders)
+    }
+
     private fun persist(list: List<Entry>) {
         val arr = JSONArray()
         list.forEach {
@@ -91,6 +116,7 @@ object PrivateStore {
                     .put("thumbFileName", it.thumbFileName ?: JSONObject.NULL)
                     .put("sizeBytes", it.sizeBytes)
                     .put("savedAt", it.savedAt)
+                    .put("folderId", it.folderId ?: JSONObject.NULL)
             )
         }
         val tmp = File(dir, "index.json.tmp")
@@ -112,6 +138,7 @@ object PrivateStore {
                     thumbFileName = if (o.isNull("thumbFileName")) null else o.getString("thumbFileName"),
                     sizeBytes = o.optLong("sizeBytes"),
                     savedAt = o.optLong("savedAt"),
+                    folderId = if (o.isNull("folderId")) null else o.getString("folderId"),
                 )
             }
         }.getOrDefault(emptyList())

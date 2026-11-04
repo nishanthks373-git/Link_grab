@@ -13,6 +13,7 @@ import android.view.WindowManager
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material3.Slider
 import androidx.compose.material3.RadioButton
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -246,6 +247,9 @@ private fun MainScreen() {
     var tab by remember { mutableStateOf(0) }
     var playing by remember { mutableStateOf<PlayTarget?>(null) }
     val downloaded by DownloadedStore.entries.collectAsState()
+    val downloadedFolders by DownloadedStore.folderStore.folders.collectAsState()
+    val hiddenEntries by PrivateStore.entries.collectAsState()
+    val hiddenFolders by PrivateStore.folderStore.folders.collectAsState()
     var hiddenOpen by remember { mutableStateOf(false) }
     var unlockRequest by remember { mutableStateOf(0) }
     var dialogId by remember { mutableStateOf<Long?>(null) }
@@ -458,27 +462,79 @@ private fun MainScreen() {
                 .padding(padding)
                 .padding(horizontal = 16.dp)
             if (hiddenOpen && PrivateLock.unlocked) {
-                PrivateLibrary(
-                    modifier = sideModifier,
-                    onPlay = { playing = PlayTarget(it.id, it.title, it.audio, Uri.fromFile(PrivateStore.file(it)), true) },
-                )
-            } else {
-                DownloadedLibrary(
-                    modifier = sideModifier,
-                    onPull = onPull,
-                    onPlay = { playing = PlayTarget(it.id, it.title, it.audio, Uri.parse(it.uri), false) },
-                    onMove = { list ->
-                        scope.launch {
-                            val n = withContext(Dispatchers.IO) { list.count { DownloadedStore.moveToHidden(it) } }
-                            toast(
-                                when {
-                                    n == list.size -> "Moved"
-                                    n == 0 -> "Couldn't move that file"
-                                    else -> "Moved $n of ${list.size}"
-                                }
-                            )
+                val actions = LibraryActions(
+                    createFolder = { n, p -> PrivateStore.folderStore.create(n, p) },
+                    renameFolder = { id, n -> PrivateStore.folderStore.rename(id, n) },
+                    renameItem = { id, n -> PrivateStore.rename(id, n) },
+                    moveItems = { ids, f -> PrivateStore.moveTo(ids.toSet(), f) },
+                    moveFolders = { ids, p -> ids.forEach { PrivateStore.folderStore.move(it, p) } },
+                    deleteItems = { ids -> scope.launch(Dispatchers.IO) { ids.forEach { PrivateStore.delete(it) } } },
+                    deleteFolders = { ids -> scope.launch(Dispatchers.IO) { ids.forEach { PrivateStore.deleteFolder(it) } } },
+                    descendants = { PrivateStore.folderStore.descendants(it) },
+                    play = { id ->
+                        PrivateStore.entries.value.firstOrNull { it.id == id }?.let {
+                            playing = PlayTarget(it.id, it.title, it.audio, Uri.fromFile(PrivateStore.file(it)), true)
                         }
                     },
+                )
+                val libItems = hiddenEntries.map {
+                    LibItem(it.id, it.title, it.audio, it.sizeBytes, PrivateStore.thumb(it), it.folderId)
+                }
+                LibraryScreen(
+                    modifier = sideModifier,
+                    items = libItems,
+                    folders = hiddenFolders,
+                    actions = actions,
+                    emptyTitle = "Nothing here yet",
+                    emptyText = null,
+                    accent = MaterialTheme.colorScheme.tertiary,
+                )
+            } else {
+                val actions = LibraryActions(
+                    createFolder = { n, p -> DownloadedStore.folderStore.create(n, p) },
+                    renameFolder = { id, n -> DownloadedStore.folderStore.rename(id, n) },
+                    renameItem = { id, n -> scope.launch(Dispatchers.IO) { DownloadedStore.rename(id, n) } },
+                    moveItems = { ids, f -> DownloadedStore.moveTo(ids.toSet(), f) },
+                    moveFolders = { ids, p -> ids.forEach { DownloadedStore.folderStore.move(it, p) } },
+                    deleteItems = { ids -> scope.launch(Dispatchers.IO) { ids.forEach { DownloadedStore.delete(it) } } },
+                    deleteFolders = { ids -> scope.launch(Dispatchers.IO) { ids.forEach { DownloadedStore.deleteFolder(it) } } },
+                    descendants = { DownloadedStore.folderStore.descendants(it) },
+                    play = { id ->
+                        DownloadedStore.entries.value.firstOrNull { it.id == id }?.let {
+                            playing = PlayTarget(it.id, it.title, it.audio, Uri.parse(it.uri), false)
+                        }
+                    },
+                    extra = ExtraAction(
+                        label = "Move to private",
+                        confirmTitle = "Move to private?",
+                        confirmText = "These files will be removed from Downloads, so other apps and the gallery can no longer see them.",
+                        run = { ids ->
+                            scope.launch {
+                                val list = DownloadedStore.entries.value.filter { it.id in ids }
+                                val n = withContext(Dispatchers.IO) { list.count { DownloadedStore.moveToHidden(it) } }
+                                toast(
+                                    when {
+                                        n == list.size -> "Moved"
+                                        n == 0 -> "Couldn't move that file"
+                                        else -> "Moved $n of ${list.size}"
+                                    }
+                                )
+                            }
+                        },
+                    ),
+                )
+                val libItems = downloaded.map {
+                    LibItem(it.id, it.title, it.audio, it.sizeBytes, DownloadedStore.thumb(it), it.folderId)
+                }
+                LibraryScreen(
+                    modifier = sideModifier,
+                    items = libItems,
+                    folders = downloadedFolders,
+                    actions = actions,
+                    emptyTitle = "Nothing downloaded yet",
+                    emptyText = "Finished downloads show up here.",
+                    accent = MaterialTheme.colorScheme.primary,
+                    onPull = onPull,
                 )
             }
         } else LazyColumn(
@@ -1070,105 +1126,6 @@ private fun QueueCard(item: DownloadItem, modifier: Modifier = Modifier) {
     }
 }
 
-// ================================================================ private library
-
-@Composable
-private fun PrivateLibrary(modifier: Modifier = Modifier, onPlay: (PrivateStore.Entry) -> Unit) {
-    val cs = MaterialTheme.colorScheme
-    val entries by PrivateStore.entries.collectAsState()
-    var toDelete by remember { mutableStateOf<PrivateStore.Entry?>(null) }
-
-    if (entries.isEmpty()) {
-        Column(
-            modifier = modifier
-                .fillMaxWidth()
-                .padding(top = 32.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            LogoMark(size = 80.dp, circle = cs.tertiary)
-            Text("Nothing here yet", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        }
-    } else {
-        LazyColumn(
-            modifier = modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            contentPadding = PaddingValues(vertical = 14.dp),
-        ) {
-            items(entries.asReversed(), key = { it.id }) { entry ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .animateItem(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = cs.surface),
-                    border = BorderStroke(1.dp, cs.outline.copy(alpha = 0.25f)),
-                ) {
-                    Row(modifier = Modifier.height(IntrinsicSize.Min)) {
-                        Box(
-                            modifier = Modifier
-                                .width(6.dp)
-                                .fillMaxHeight()
-                                .background(cs.tertiary),
-                        )
-                        Row(
-                            modifier = Modifier.padding(10.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            Thumb(PrivateStore.thumb(entry), null, width = 96.dp)
-                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text(
-                                    text = entry.title,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Medium,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    StatusChip(
-                                        if (entry.audio) "audio" else "video",
-                                        cs.tertiaryContainer,
-                                        cs.onTertiaryContainer,
-                                    )
-                                    StatusChip(
-                                        formatSize(entry.sizeBytes).removePrefix("~"),
-                                        cs.surfaceVariant,
-                                        cs.onSurfaceVariant,
-                                    )
-                                }
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    FilledTonalButton(
-                                        onClick = { onPlay(entry) },
-                                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-                                    ) { Text("Play") }
-                                    TextButton(onClick = { toDelete = entry }) {
-                                        Text("Delete", color = cs.error)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    toDelete?.let { entry ->
-        AlertDialog(
-            onDismissRequest = { toDelete = null },
-            title = { Text("Delete this file?") },
-            text = { Text("\"${entry.title}\" will be permanently deleted from this phone.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    PrivateStore.delete(entry.id)
-                    toDelete = null
-                }) { Text("Delete", color = cs.error) }
-            },
-            dismissButton = { TextButton(onClick = { toDelete = null }) { Text("Cancel") } },
-        )
-    }
-}
-
 @Composable
 private fun PlayerScreen(entry: PlayTarget, onClose: () -> Unit) {
     BackHandler(onBack = onClose)
@@ -1480,210 +1437,6 @@ private fun DownloadIconButton(onClick: () -> Unit) {
 
 class PlayTarget(val id: String, val title: String, val audio: Boolean, val uri: Uri, val hidden: Boolean)
 
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun DownloadedLibrary(
-    modifier: Modifier = Modifier,
-    onPlay: (DownloadedStore.Entry) -> Unit,
-    onMove: (List<DownloadedStore.Entry>) -> Unit,
-    onPull: () -> Unit,
-) {
-    val listState = rememberLazyListState()
-    val cs = MaterialTheme.colorScheme
-    val entries by DownloadedStore.entries.collectAsState()
-    val scope = rememberCoroutineScope()
-    var toDelete by remember { mutableStateOf<List<DownloadedStore.Entry>?>(null) }
-    var toMove by remember { mutableStateOf<List<DownloadedStore.Entry>?>(null) }
-    var picked by remember { mutableStateOf<Set<String>>(emptySet()) }
-    // Forget picks for files that are gone.
-    val chosen = entries.filter { it.id in picked }
-    val selecting = chosen.isNotEmpty()
-    BackHandler(enabled = selecting) { picked = emptySet() }
-    fun toggle(id: String) {
-        picked = if (id in picked) picked - id else picked + id
-    }
-
-    Column(modifier = modifier.fillMaxSize()) {
-    if (selecting) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("${chosen.size} selected", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            TextButton(
-                onClick = { picked = if (chosen.size == entries.size) emptySet() else entries.map { it.id }.toSet() },
-                contentPadding = PaddingValues(horizontal = 8.dp),
-            ) { Text(if (chosen.size == entries.size) "None" else "All") }
-            TextButton(onClick = { toMove = chosen }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Move to private") }
-            TextButton(onClick = { toDelete = chosen }, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                Text("Delete", color = cs.error)
-            }
-            IconButton(onClick = { picked = emptySet() }, modifier = Modifier.size(36.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "Cancel")
-            }
-        }
-    }
-    LazyColumn(
-        state = listState,
-        modifier = Modifier
-            .weight(1f)
-            .fillMaxWidth()
-            // Watches (without consuming) for a downward drag that starts with the list at the top.
-            .pointerInput(Unit) {
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                    val atTop = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
-                    var total = 0f
-                    var change = down
-                    while (change.pressed) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                        change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        total += change.positionChange().y
-                    }
-                    if (atTop && total > 150f) onPull()
-                }
-            },
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-        contentPadding = PaddingValues(vertical = 14.dp),
-    ) {
-        if (entries.isEmpty()) {
-            item(key = "empty") {
-                Column(
-                    modifier = Modifier
-                        .fillParentMaxSize()
-                        .padding(top = 32.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    LogoMark(size = 80.dp, circle = cs.primary)
-                    Text("Nothing downloaded yet", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text(
-                        "Finished downloads show up here.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = cs.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                    )
-                }
-            }
-        }
-        items(entries.asReversed(), key = { it.id }) { entry ->
-            val isPicked = entry.id in picked
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .animateItem(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isPicked) cs.primaryContainer.copy(alpha = 0.45f) else cs.surface,
-                ),
-                border = BorderStroke(
-                    if (isPicked) 1.5.dp else 1.dp,
-                    if (isPicked) cs.primary else cs.outline.copy(alpha = 0.25f),
-                ),
-            ) {
-                Row(
-                    modifier = Modifier
-                        .height(IntrinsicSize.Min)
-                        .combinedClickable(
-                            onClick = { if (selecting) toggle(entry.id) },
-                            onLongClick = { toggle(entry.id) },
-                        ),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .width(6.dp)
-                            .fillMaxHeight()
-                            .background(cs.primary),
-                    )
-                    Row(
-                        modifier = Modifier.padding(10.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.Top,
-                    ) {
-                        if (selecting) {
-                            Checkbox(checked = isPicked, onCheckedChange = { toggle(entry.id) })
-                        }
-                        Thumb(DownloadedStore.thumb(entry), null, width = 96.dp)
-                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(
-                                text = entry.title,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                StatusChip(
-                                    if (entry.audio) "audio" else "video",
-                                    cs.primaryContainer,
-                                    cs.onPrimaryContainer,
-                                )
-                                StatusChip(
-                                    formatSize(entry.sizeBytes).removePrefix("~"),
-                                    cs.surfaceVariant,
-                                    cs.onSurfaceVariant,
-                                )
-                            }
-                            if (!selecting) {
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    FilledTonalButton(
-                                        onClick = { onPlay(entry) },
-                                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-                                    ) { Text("Play") }
-                                    TextButton(onClick = { toDelete = listOf(entry) }) {
-                                        Text("Delete", color = cs.error)
-                                    }
-                                }
-                                TextButton(
-                                    onClick = { toMove = listOf(entry) },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                ) { Text("Move to private") }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    }
-
-    toMove?.let { list ->
-        val label = if (list.size == 1) "\"${list[0].title}\"" else "${list.size} files"
-        AlertDialog(
-            onDismissRequest = { toMove = null },
-            title = { Text("Move to private?") },
-            text = { Text("$label will be removed from Downloads, so other apps and the gallery can no longer see ${if (list.size == 1) "it" else "them"}.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    onMove(list)
-                    picked = emptySet()
-                    toMove = null
-                }) { Text("Move", fontWeight = FontWeight.Bold) }
-            },
-            dismissButton = { TextButton(onClick = { toMove = null }) { Text("Cancel") } },
-        )
-    }
-
-    toDelete?.let { list ->
-        val label = if (list.size == 1) "\"${list[0].title}\"" else "${list.size} files"
-        AlertDialog(
-            onDismissRequest = { toDelete = null },
-            title = { Text(if (list.size == 1) "Delete this file?" else "Delete ${list.size} files?") },
-            text = { Text("$label will be permanently deleted from this phone.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    toDelete = null
-                    picked = emptySet()
-                    scope.launch(Dispatchers.IO) { list.forEach { DownloadedStore.delete(it.id) } }
-                }) { Text("Delete", color = cs.error) }
-            },
-            dismissButton = { TextButton(onClick = { toDelete = null }) { Text("Cancel") } },
-        )
-    }
-}
-
 /** Asks for the quality and whether to download privately, for this one download only. */
 @Composable
 private fun DownloadDialog(item: PreviewItem, onDismiss: () -> Unit, onConfirm: (Int, Boolean) -> Unit) {
@@ -1736,6 +1489,487 @@ private fun DownloadDialog(item: PreviewItem, onDismiss: () -> Unit, onConfirm: 
         },
         confirmButton = {
             TextButton(onClick = { onConfirm(index, hidden) }) { Text("Download", fontWeight = FontWeight.Bold) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+// ============================================================ shared library screen
+
+/**
+ * Folders and files for both the Downloaded list and the app-only list: open and create folders,
+ * select several things, then rename, move, delete (and any extra action).
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LibraryScreen(
+    modifier: Modifier,
+    items: List<LibItem>,
+    folders: List<LibFolder>,
+    actions: LibraryActions,
+    emptyTitle: String,
+    emptyText: String?,
+    accent: Color,
+    onPull: (() -> Unit)? = null,
+) {
+    val cs = MaterialTheme.colorScheme
+    val listState = rememberLazyListState()
+    var current by remember { mutableStateOf<String?>(null) }
+    var selectMode by remember { mutableStateOf(false) }
+    var pickedItems by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var pickedFolders by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var newFolder by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf<Pair<Boolean, String>?>(null) } // (isFolder, id)
+    var moving by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf(false) }
+    var extraAsk by remember { mutableStateOf(false) }
+
+    // If the folder we are in disappears (deleted), go back to the top.
+    LaunchedEffect(folders) {
+        if (current != null && folders.none { it.id == current }) current = null
+    }
+
+    val chosenItems = items.filter { it.id in pickedItems }
+    val chosenFolders = folders.filter { it.id in pickedFolders }
+    val count = chosenItems.size + chosenFolders.size
+    val selecting = selectMode || count > 0
+
+    val subFolders = folders.filter { it.parentId == current }.sortedBy { it.name.lowercase() }
+    val files = items.filter { it.folderId == current }.asReversed()
+    val currentFolder = folders.firstOrNull { it.id == current }
+
+    fun clearSelection() {
+        selectMode = false
+        pickedItems = emptySet()
+        pickedFolders = emptySet()
+    }
+    fun toggleItem(id: String) {
+        pickedItems = if (id in pickedItems) pickedItems - id else pickedItems + id
+    }
+    fun toggleFolder(id: String) {
+        pickedFolders = if (id in pickedFolders) pickedFolders - id else pickedFolders + id
+    }
+    fun itemsInside(folderId: String): Int {
+        val all = actions.descendants(folderId) + folderId
+        return items.count { it.folderId in all }
+    }
+
+    BackHandler(enabled = current != null) { current = currentFolder?.parentId }
+    BackHandler(enabled = selecting) { clearSelection() }
+
+    Column(modifier = modifier.fillMaxSize()) {
+        if (selecting) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("$count selected", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                val everything = count == subFolders.size + files.size && count > 0
+                TextButton(
+                    onClick = {
+                        if (everything) {
+                            pickedItems = emptySet(); pickedFolders = emptySet()
+                        } else {
+                            pickedItems = files.map { it.id }.toSet()
+                            pickedFolders = subFolders.map { it.id }.toSet()
+                        }
+                    },
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) { Text(if (everything) "None" else "All") }
+                IconButton(onClick = { clearSelection() }, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = "Cancel")
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (count == 1) {
+                    SmallPill("Rename") {
+                        renaming = if (chosenFolders.isNotEmpty()) true to chosenFolders[0].id else false to chosenItems[0].id
+                    }
+                }
+                if (count > 0) SmallPill("Move to folder") { moving = true }
+                if (actions.extra != null && chosenFolders.isEmpty() && chosenItems.isNotEmpty()) {
+                    SmallPill(actions.extra.label) { extraAsk = true }
+                }
+                if (count > 0) SmallPill("Delete") { deleting = true }
+            }
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (currentFolder != null) {
+                    TextButton(
+                        onClick = { current = currentFolder.parentId },
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) { Text("‹ Back") }
+                    Text(
+                        currentFolder.name,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                } else {
+                    Box(modifier = Modifier.weight(1f))
+                }
+                TextButton(onClick = { newFolder = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                    Text("New folder")
+                }
+                TextButton(onClick = { selectMode = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                    Text("Select")
+                }
+            }
+        }
+
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .then(
+                    if (onPull == null) Modifier
+                    else Modifier.pointerInput(Unit) {
+                        // Watches (without consuming) for a downward drag that starts with the list at the top.
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            val atTop = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
+                            var total = 0f
+                            var change = down
+                            while (change.pressed) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                total += change.positionChange().y
+                            }
+                            if (atTop && total > 150f) onPull()
+                        }
+                    }
+                ),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(vertical = 10.dp),
+        ) {
+            if (subFolders.isEmpty() && files.isEmpty()) {
+                item(key = "empty") {
+                    Column(
+                        modifier = Modifier
+                            .fillParentMaxSize()
+                            .padding(top = 32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        LogoMark(size = 80.dp, circle = accent)
+                        Text(
+                            if (currentFolder != null) "This folder is empty" else emptyTitle,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        if (emptyText != null && currentFolder == null) {
+                            Text(
+                                emptyText,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = cs.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
+                }
+            }
+
+            items(subFolders, key = { "f" + it.id }) { folder ->
+                val picked = folder.id in pickedFolders
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .animateItem(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (picked) cs.primaryContainer.copy(alpha = 0.45f) else cs.surface,
+                    ),
+                    border = BorderStroke(
+                        if (picked) 1.5.dp else 1.dp,
+                        if (picked) cs.primary else cs.outline.copy(alpha = 0.25f),
+                    ),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .combinedClickable(
+                                onClick = { if (selecting) toggleFolder(folder.id) else current = folder.id },
+                                onLongClick = { toggleFolder(folder.id) },
+                            )
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        if (selecting) Checkbox(checked = picked, onCheckedChange = { toggleFolder(folder.id) })
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(accent.copy(alpha = 0.18f)),
+                            contentAlignment = Alignment.Center,
+                        ) { Text("📁", fontSize = 24.sp) }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                folder.name,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            val n = itemsInside(folder.id)
+                            Text(
+                                if (n == 1) "1 file" else "$n files",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = cs.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+
+            items(files, key = { "i" + it.id }) { entry ->
+                val picked = entry.id in pickedItems
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .animateItem(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (picked) cs.primaryContainer.copy(alpha = 0.45f) else cs.surface,
+                    ),
+                    border = BorderStroke(
+                        if (picked) 1.5.dp else 1.dp,
+                        if (picked) cs.primary else cs.outline.copy(alpha = 0.25f),
+                    ),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .height(IntrinsicSize.Min)
+                            .combinedClickable(
+                                onClick = { if (selecting) toggleItem(entry.id) },
+                                onLongClick = { toggleItem(entry.id) },
+                            ),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(6.dp)
+                                .fillMaxHeight()
+                                .background(accent),
+                        )
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.Top,
+                        ) {
+                            if (selecting) Checkbox(checked = picked, onCheckedChange = { toggleItem(entry.id) })
+                            Thumb(entry.thumb, null, width = 96.dp)
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(
+                                    text = entry.title,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    StatusChip(
+                                        if (entry.audio) "audio" else "video",
+                                        cs.primaryContainer,
+                                        cs.onPrimaryContainer,
+                                    )
+                                    StatusChip(
+                                        formatSize(entry.sizeBytes).removePrefix("~"),
+                                        cs.surfaceVariant,
+                                        cs.onSurfaceVariant,
+                                    )
+                                }
+                                if (!selecting) {
+                                    FilledTonalButton(
+                                        onClick = { actions.play(entry.id) },
+                                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                                    ) { Text("Play") }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ dialogs
+    if (newFolder) {
+        NameDialog(
+            title = "New folder",
+            initial = "",
+            confirmLabel = "Create",
+            onDismiss = { newFolder = false },
+            onConfirm = { name -> actions.createFolder(name, current).also { if (it == null) newFolder = false } },
+        )
+    }
+
+    renaming?.let { (isFolder, id) ->
+        val initial = if (isFolder) folders.firstOrNull { it.id == id }?.name else items.firstOrNull { it.id == id }?.title
+        if (initial == null) {
+            renaming = null
+        } else NameDialog(
+            title = if (isFolder) "Rename folder" else "Rename file",
+            initial = initial,
+            confirmLabel = "Rename",
+            onDismiss = { renaming = null },
+            onConfirm = { name ->
+                if (isFolder) {
+                    actions.renameFolder(id, name).also { if (it == null) { renaming = null; clearSelection() } }
+                } else if (name.isBlank()) "Enter a name"
+                else {
+                    actions.renameItem(id, name)
+                    renaming = null
+                    clearSelection()
+                    null
+                }
+            },
+        )
+    }
+
+    if (moving) {
+        // Folders that can't be a destination: the ones being moved and everything inside them.
+        val excluded = HashSet<String>().apply {
+            chosenFolders.forEach { add(it.id); addAll(actions.descendants(it.id)) }
+        }
+        val options = ArrayList<Pair<LibFolder, Int>>()
+        fun flatten(parent: String?, depth: Int) {
+            folders.filter { it.parentId == parent && it.id !in excluded }
+                .sortedBy { it.name.lowercase() }
+                .forEach { options += it to depth; flatten(it.id, depth + 1) }
+        }
+        flatten(null, 1)
+        var dest by remember { mutableStateOf<String?>(current) }
+        AlertDialog(
+            onDismissRequest = { moving = false },
+            title = { Text("Move to…") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 320.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { dest = null },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = dest == null, onClick = { dest = null })
+                        Text("Main list", fontWeight = FontWeight.Medium)
+                    }
+                    options.forEach { (folder, depth) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { dest = folder.id }
+                                .padding(start = (depth * 16).dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = dest == folder.id, onClick = { dest = folder.id })
+                            Text("📁 ${folder.name}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val target = dest
+                    if (chosenItems.isNotEmpty()) actions.moveItems(chosenItems.map { it.id }, target)
+                    if (chosenFolders.isNotEmpty()) actions.moveFolders(chosenFolders.map { it.id }, target)
+                    moving = false
+                    clearSelection()
+                }) { Text("Move here", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { moving = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (deleting) {
+        val folderIds = chosenFolders.map { it.id }
+        val inside = folderIds.sumOf { itemsInside(it) }
+        val what = buildString {
+            if (chosenItems.isNotEmpty()) append(if (chosenItems.size == 1) "1 file" else "${chosenItems.size} files")
+            if (chosenFolders.isNotEmpty()) {
+                if (isNotEmpty()) append(" and ")
+                append(if (chosenFolders.size == 1) "1 folder" else "${chosenFolders.size} folders")
+                if (inside > 0) append(" (with $inside file${if (inside == 1) "" else "s"} inside)")
+            }
+        }
+        AlertDialog(
+            onDismissRequest = { deleting = false },
+            title = { Text("Delete?") },
+            text = { Text("$what will be permanently deleted from this phone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    actions.deleteItems(chosenItems.map { it.id })
+                    actions.deleteFolders(folderIds)
+                    deleting = false
+                    clearSelection()
+                }) { Text("Delete", color = cs.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleting = false }) { Text("Cancel") } },
+        )
+    }
+
+    val extra = actions.extra
+    if (extraAsk && extra != null) {
+        AlertDialog(
+            onDismissRequest = { extraAsk = false },
+            title = { Text(extra.confirmTitle) },
+            text = { Text(extra.confirmText) },
+            confirmButton = {
+                TextButton(onClick = {
+                    extra.run(chosenItems.map { it.id })
+                    extraAsk = false
+                    clearSelection()
+                }) { Text(extra.label, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { extraAsk = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** A small dialog with one text field. [onConfirm] returns an error message to show, or null when done. */
+@Composable
+private fun NameDialog(
+    title: String,
+    initial: String,
+    confirmLabel: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> String?,
+) {
+    var text by remember { mutableStateOf(initial) }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it; error = null },
+                singleLine = true,
+                isError = error != null,
+                supportingText = error?.let { { Text(it) } },
+                shape = RoundedCornerShape(12.dp),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { error = onConfirm(text) }) { Text(confirmLabel, fontWeight = FontWeight.Bold) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
