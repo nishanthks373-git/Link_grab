@@ -463,7 +463,8 @@ object DownloadRepository {
             addOption("--extractor-retries", "5")
             addOption("--retry-sleep", "3")
             addOption("--socket-timeout", "30")
-            addOption("--http-chunk-size", "10M")
+            addOption("--concurrent-fragments", "4")
+            addOption("--buffer-size", "256K")
             addOption("--force-ipv4")
             addOption("-o", "${dir.absolutePath}/${item.baseName.ifBlank { "download" }.replace("%", "%%")}.%(ext)s")
             if (item.mode == Mode.AUDIO) {
