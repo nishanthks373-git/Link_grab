@@ -21,7 +21,14 @@ class LibItem(
 )
 
 /** Extra action on selected files (for example moving them to the app-only list). */
-class ExtraAction(val label: String, val confirmTitle: String, val confirmText: String, val run: (List<String>) -> Unit)
+class ExtraAction(
+    val label: String,
+    val confirmTitle: String,
+    val confirmText: String,
+    /** True if the action also works on selected folders (and everything inside them). */
+    val allowFolders: Boolean,
+    val run: (itemIds: List<String>, folderIds: List<String>) -> Unit,
+)
 
 class LibraryActions(
     val createFolder: (name: String, parentId: String?) -> String?,

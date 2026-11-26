@@ -476,6 +476,27 @@ private fun MainScreen() {
                             playing = PlayTarget(it.id, it.title, it.audio, Uri.fromFile(PrivateStore.file(it)), true)
                         }
                     },
+                    extra = ExtraAction(
+                        label = "Export",
+                        confirmTitle = "Export out of private?",
+                        confirmText = "The selected files will be copied to a hidden folder on your phone (Download/.LinkGrabExport) and removed from here. " +
+                            "Gallery and video players won't show them. To see the folder in your file manager, turn on \"show hidden files\".",
+                        allowFolders = true,
+                        run = { ids, folderIds ->
+                            scope.launch {
+                                val (ok, total) = withContext(Dispatchers.IO) {
+                                    PrivateStore.exportOut(ids.toSet(), folderIds.toSet())
+                                }
+                                toast(
+                                    when {
+                                        total == 0 -> "Nothing to export"
+                                        ok == total -> "Exported"
+                                        else -> "Exported $ok of $total"
+                                    }
+                                )
+                            }
+                        },
+                    ),
                 )
                 val libItems = hiddenEntries.map {
                     LibItem(it.id, it.title, it.audio, it.sizeBytes, PrivateStore.thumb(it), it.folderId)
@@ -508,7 +529,8 @@ private fun MainScreen() {
                         label = "Move to private",
                         confirmTitle = "Move to private?",
                         confirmText = "These files will be removed from Downloads, so other apps and the gallery can no longer see them.",
-                        run = { ids ->
+                        allowFolders = false,
+                        run = { ids, _ ->
                             scope.launch {
                                 val list = DownloadedStore.entries.value.filter { it.id in ids }
                                 val n = withContext(Dispatchers.IO) { list.count { DownloadedStore.moveToHidden(it) } }
@@ -1594,7 +1616,7 @@ private fun LibraryScreen(
                     }
                 }
                 if (count > 0) SmallPill("Move to folder") { moving = true }
-                if (actions.extra != null && chosenFolders.isEmpty() && chosenItems.isNotEmpty()) {
+                if (actions.extra != null && count > 0 && (actions.extra.allowFolders || chosenFolders.isEmpty())) {
                     SmallPill(actions.extra.label) { extraAsk = true }
                 }
                 if (count > 0) SmallPill("Delete") { deleting = true }
@@ -1934,7 +1956,7 @@ private fun LibraryScreen(
             text = { Text(extra.confirmText) },
             confirmButton = {
                 TextButton(onClick = {
-                    extra.run(chosenItems.map { it.id })
+                    extra.run(chosenItems.map { it.id }, chosenFolders.map { it.id })
                     extraAsk = false
                     clearSelection()
                 }) { Text(extra.label, fontWeight = FontWeight.Bold) }
