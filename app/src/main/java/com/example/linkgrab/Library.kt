@@ -18,6 +18,7 @@ class LibItem(
     val sizeBytes: Long,
     val thumb: Any?,
     val folderId: String?,
+    val savedAt: Long = 0L,
 )
 
 /** Extra action on selected files (for example moving them to the app-only list). */

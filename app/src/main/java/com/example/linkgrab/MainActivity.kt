@@ -500,7 +500,7 @@ private fun MainScreen() {
                     ),
                 )
                 val libItems = hiddenEntries.map {
-                    LibItem(it.id, it.title, it.audio, it.sizeBytes, PrivateStore.thumb(it), it.folderId)
+                    LibItem(it.id, it.title, it.audio, it.sizeBytes, PrivateStore.thumb(it), it.folderId, it.savedAt)
                 }
                 LibraryScreen(
                     modifier = sideModifier,
@@ -547,7 +547,7 @@ private fun MainScreen() {
                     ),
                 )
                 val libItems = downloaded.map {
-                    LibItem(it.id, it.title, it.audio, it.sizeBytes, DownloadedStore.thumb(it), it.folderId)
+                    LibItem(it.id, it.title, it.audio, it.sizeBytes, DownloadedStore.thumb(it), it.folderId, it.savedAt)
                 }
                 LibraryScreen(
                     modifier = sideModifier,
@@ -1566,18 +1566,22 @@ private fun LibraryScreen(
         val all = actions.descendants(fid) + fid
         items.filter { it.folderId in all }.sumOf { it.sizeBytes }
     }
+    val latestInFolder: (String) -> Long = { fid ->
+        val all = actions.descendants(fid) + fid
+        items.filter { it.folderId in all }.maxOfOrNull { it.savedAt } ?: 0L
+    }
     val subFolders = folders.filter { it.parentId == current }.let { list ->
         when (sortBy) {
             2 -> list.sortedBy { sizeOfFolder(it.id) }.let { if (ascending) it else it.reversed() }
             1 -> list.sortedBy { it.name.lowercase() }.let { if (ascending) it else it.reversed() }
-            else -> list.sortedBy { it.name.lowercase() }
+            else -> list.sortedBy { latestInFolder(it.id) }.let { if (ascending) it else it.reversed() }
         }
     }
     val files = items.filter { it.folderId == current }.let { list ->
         when (sortBy) {
             1 -> list.sortedBy { it.title.lowercase() }.let { if (ascending) it else it.reversed() }
             2 -> list.sortedBy { it.sizeBytes }.let { if (ascending) it else it.reversed() }
-            else -> if (ascending) list else list.asReversed()
+            else -> list.sortedBy { it.savedAt }.let { if (ascending) it else it.reversed() }
         }
     }
     val currentFolder = folders.firstOrNull { it.id == current }
@@ -1673,7 +1677,7 @@ private fun LibraryScreen(
                         Text("⇅ Sort", maxLines = 1)
                     }
                     DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }) {
-                        val sortOptions = listOf("Date added", "Name", "Size")
+                        val sortOptions = listOf("Downloaded time", "Name", "Size")
                         sortOptions.forEachIndexed { i, label ->
                             DropdownMenuItem(
                                 text = { Text(label, fontWeight = if (sortBy == i) FontWeight.Bold else FontWeight.Normal) },
@@ -1866,6 +1870,13 @@ private fun LibraryScreen(
                                         formatSize(entry.sizeBytes).removePrefix("~"),
                                         cs.surfaceVariant,
                                         cs.onSurfaceVariant,
+                                    )
+                                }
+                                if (entry.savedAt > 0) {
+                                    Text(
+                                        android.text.format.DateFormat.format("d MMM yyyy, h:mm a", entry.savedAt).toString(),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = cs.onSurfaceVariant,
                                     )
                                 }
                                 if (!selecting) {
