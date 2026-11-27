@@ -88,6 +88,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -1556,8 +1557,29 @@ private fun LibraryScreen(
     val count = chosenItems.size + chosenFolders.size
     val selecting = selectMode || count > 0
 
-    val subFolders = folders.filter { it.parentId == current }.sortedBy { it.name.lowercase() }
-    val files = items.filter { it.folderId == current }.asReversed()
+    // Sorting: 0 = date added, 1 = name, 2 = size.
+    var sortBy by remember { mutableStateOf(0) }
+    var ascending by remember { mutableStateOf(false) }
+    var sortMenu by remember { mutableStateOf(false) }
+
+    val sizeOfFolder: (String) -> Long = { fid ->
+        val all = actions.descendants(fid) + fid
+        items.filter { it.folderId in all }.sumOf { it.sizeBytes }
+    }
+    val subFolders = folders.filter { it.parentId == current }.let { list ->
+        when (sortBy) {
+            2 -> list.sortedBy { sizeOfFolder(it.id) }.let { if (ascending) it else it.reversed() }
+            1 -> list.sortedBy { it.name.lowercase() }.let { if (ascending) it else it.reversed() }
+            else -> list.sortedBy { it.name.lowercase() }
+        }
+    }
+    val files = items.filter { it.folderId == current }.let { list ->
+        when (sortBy) {
+            1 -> list.sortedBy { it.title.lowercase() }.let { if (ascending) it else it.reversed() }
+            2 -> list.sortedBy { it.sizeBytes }.let { if (ascending) it else it.reversed() }
+            else -> if (ascending) list else list.asReversed()
+        }
+    }
     val currentFolder = folders.firstOrNull { it.id == current }
 
     fun clearSelection() {
@@ -1645,6 +1667,37 @@ private fun LibraryScreen(
                 }
                 TextButton(onClick = { newFolder = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
                     Text("New folder")
+                }
+                Box {
+                    TextButton(onClick = { sortMenu = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Text("⇅ Sort", maxLines = 1)
+                    }
+                    DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }) {
+                        val sortOptions = listOf("Date added", "Name", "Size")
+                        sortOptions.forEachIndexed { i, label ->
+                            DropdownMenuItem(
+                                text = { Text(label, fontWeight = if (sortBy == i) FontWeight.Bold else FontWeight.Normal) },
+                                leadingIcon = { RadioButton(selected = sortBy == i, onClick = null) },
+                                onClick = {
+                                    if (sortBy != i) {
+                                        sortBy = i
+                                        ascending = i == 1 // names A→Z first; date and size newest/largest first
+                                    }
+                                },
+                            )
+                        }
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            text = { Text("Ascending", fontWeight = if (ascending) FontWeight.Bold else FontWeight.Normal) },
+                            leadingIcon = { RadioButton(selected = ascending, onClick = null) },
+                            onClick = { ascending = true; sortMenu = false },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Descending", fontWeight = if (!ascending) FontWeight.Bold else FontWeight.Normal) },
+                            leadingIcon = { RadioButton(selected = !ascending, onClick = null) },
+                            onClick = { ascending = false; sortMenu = false },
+                        )
+                    }
                 }
                 TextButton(onClick = { selectMode = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
                     Text("Select")
@@ -1747,8 +1800,10 @@ private fun LibraryScreen(
                                 overflow = TextOverflow.Ellipsis,
                             )
                             val n = itemsInside(folder.id)
+                            val total = sizeOfFolder(folder.id)
                             Text(
-                                if (n == 1) "1 file" else "$n files",
+                                (if (n == 1) "1 file" else "$n files") +
+                                    (if (total > 0) " · " + formatSize(total).removePrefix("~") else ""),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = cs.onSurfaceVariant,
                             )
